@@ -1,7 +1,7 @@
 /**
- * Artvision Bot - Telegram Webhook Handler
- * POST /api/telegram - обработка входящих сообщений
- * GET /api/telegram - проверка статуса
+ * Artvision Bot v2.2
+ * + /positions - позиции сайтов
+ * + /myid - узнать свой Telegram ID
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -26,7 +26,8 @@ async function sendMessage(chatId: number, text: string) {
     body: JSON.stringify({
       chat_id: chatId,
       text,
-      parse_mode: 'HTML'
+      parse_mode: 'HTML',
+      disable_web_page_preview: true
     })
   });
 }
@@ -75,8 +76,10 @@ async function handleStart(chatId: number, userName: string) {
 <b>Команды:</b>
 /tasks — Задачи без сроков/исполнителей
 /overdue — Просроченные задачи  
-/workload — Загрузка команды
 /week — Задачи на неделю
+/positions — Позиции сайтов
+/workload — Загрузка команды (админы)
+/myid — Узнать свой Telegram ID
 
 🔗 <a href="https://artvision-portal.vercel.app">Открыть портал</a>`;
   
@@ -187,15 +190,39 @@ async function handleWeek(chatId: number) {
   await sendMessage(chatId, text);
 }
 
+async function handlePositions(chatId: number) {
+  // Данные о позициях — пока заглушка, потом подключим API
+  const text = `📊 <b>Позиции сайтов</b>
+
+Данные из Яндекс.Вебмастер скоро будут доступны.
+
+Пока можете посмотреть в портале:
+🔗 <a href="https://artvision-portal.vercel.app">Открыть портал</a>
+
+Или в таблице:
+📋 <a href="https://docs.google.com/spreadsheets/d/17a-IY...">Google Sheets</a>`;
+  
+  await sendMessage(chatId, text);
+}
+
+async function handleMyId(chatId: number, userId: number, userName: string) {
+  const isAdmin = ADMIN_IDS.includes(userId);
+  const text = `🆔 <b>Твой Telegram ID:</b> <code>${userId}</code>
+
+👤 Имя: ${userName}
+${isAdmin ? '✅ Ты админ бота' : '❌ Ты не админ бота'}
+
+<i>Отправь этот ID администратору, чтобы получить доступ к командам админа.</i>`;
+  
+  await sendMessage(chatId, text);
+}
+
 // ═══════════════════════════════════════════════════════════════
-// ПАРСЕР КОМАНД (поддержка групп)
+// ПАРСЕР КОМАНД
 // ═══════════════════════════════════════════════════════════════
 
 function parseCommand(text: string): string | null {
   if (!text || !text.startsWith('/')) return null;
-  
-  // Убираем @username из команды (для групп)
-  // /start@avportalbot -> /start
   const command = text.split('@')[0].split(' ')[0].toLowerCase();
   return command;
 }
@@ -220,10 +247,11 @@ async function processUpdate(update: any) {
   
   const isAdmin = ADMIN_IDS.includes(userId);
   
-  console.log(`[Bot] Command: ${command} from ${userName} (${userId}) in chat ${chatId}`);
+  console.log(`[Bot] ${command} from ${userName} (${userId}), admin: ${isAdmin}`);
   
   switch (command) {
     case '/start':
+    case '/help':
       await handleStart(chatId, userName);
       break;
     case '/tasks':
@@ -236,14 +264,18 @@ async function processUpdate(update: any) {
       if (isAdmin) {
         await handleWorkload(chatId);
       } else {
-        await sendMessage(chatId, '⛔ Эта команда только для админов');
+        await sendMessage(chatId, `⛔ Эта команда только для админов\n\nТвой ID: <code>${userId}</code>`);
       }
       break;
     case '/week':
       await handleWeek(chatId);
       break;
-    case '/help':
-      await handleStart(chatId, userName);
+    case '/positions':
+      await handlePositions(chatId);
+      break;
+    case '/myid':
+    case '/id':
+      await handleMyId(chatId, userId, userName);
       break;
   }
 }
@@ -255,11 +287,10 @@ async function processUpdate(update: any) {
 export async function POST(request: NextRequest) {
   try {
     const update = await request.json();
-    console.log('[Bot] Received update:', JSON.stringify(update).slice(0, 500));
     await processUpdate(update);
     return NextResponse.json({ ok: true });
   } catch (error) {
-    console.error('[Bot] Webhook error:', error);
+    console.error('[Bot] Error:', error);
     return NextResponse.json({ ok: false }, { status: 500 });
   }
 }
@@ -267,7 +298,7 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({ 
     status: 'Artvision Bot is running!',
-    webhook: '/api/telegram',
-    version: '2.1'
+    version: '2.2',
+    commands: ['/start', '/tasks', '/overdue', '/week', '/positions', '/workload', '/myid']
   });
 }
