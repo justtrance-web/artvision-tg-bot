@@ -243,15 +243,59 @@ async function handleWeek(chatId: number) {
 }
 
 async function handlePositions(chatId: number) {
-  const text = `📊 <b>Позиции сайтов</b>
-
-Данные из Яндекс.Вебмастер скоро будут доступны.
-
-Пока можете посмотреть позиции в портале:`;
+  // Получаем данные из Supabase
+  const SUPABASE_URL = process.env.SUPABASE_URL || 'https://gjwdlbwznkwjghquhhyz.supabase.co';
+  const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || '';
+  
+  let text = '📊 <b>Позиции сайтов</b>\n\n';
+  
+  try {
+    // Получаем позиции с джойном клиентов
+    const resp = await fetch(
+      `${SUPABASE_URL}/rest/v1/positions?select=query,position,clicks,ctr,client_id,clients(name,domain)&order=position.asc&limit=15`,
+      {
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+    
+    const positions = await resp.json();
+    
+    if (Array.isArray(positions) && positions.length > 0) {
+      // Группируем по клиентам
+      const byClient: Record<string, any[]> = {};
+      for (const p of positions) {
+        const clientName = p.clients?.name || 'Неизвестный';
+        if (!byClient[clientName]) byClient[clientName] = [];
+        byClient[clientName].push(p);
+      }
+      
+      for (const [client, items] of Object.entries(byClient)) {
+        text += `🏢 <b>${client}</b>\n`;
+        for (const item of items.slice(0, 3)) {
+          const pos = Math.round(item.position);
+          const emoji = pos <= 3 ? '🥇' : pos <= 5 ? '🥈' : pos <= 10 ? '🥉' : '📍';
+          text += `${emoji} <b>${pos}</b> — ${item.query}\n`;
+          text += `    👆 ${item.clicks} кликов | CTR ${item.ctr}%\n`;
+        }
+        text += '\n';
+      }
+      
+      text += `<i>Обновлено: ${new Date().toLocaleDateString('ru-RU')}</i>`;
+    } else {
+      text += '❌ Данные позиций пока не загружены.\n\n';
+      text += 'Позиции обновляются из Яндекс.Вебмастер.';
+    }
+  } catch (error) {
+    console.error('[Positions] Error:', error);
+    text += '❌ Ошибка загрузки данных.\n\n';
+    text += 'Попробуйте позже или откройте портал:';
+  }
   
   const buttons: InlineButton[][] = [
-    [{ text: '📈 Позиции в портале', web_app: { url: `${PORTAL_URL}/positions` } }],
-    [{ text: '📋 Google Sheets', url: 'https://docs.google.com/spreadsheets/d/17a-IY' }]
+    [{ text: '📈 Все позиции в портале', web_app: { url: `${PORTAL_URL}/positions` } }]
   ];
   
   await sendMessage(chatId, text, buttons);
@@ -400,9 +444,9 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({ 
     status: 'Artvision Bot is running!',
-    version: '2.4',
+    version: '2.5',
     portal_url: PORTAL_URL,
-    features: ['Mini App', 'Inline Buttons', 'Callbacks', 'ENV Config'],
+    features: ['Mini App', 'Inline Buttons', 'Callbacks', 'ENV Config', 'Supabase Positions'],
     commands: ['/start', '/tasks', '/overdue', '/week', '/positions', '/workload', '/myid', '/portal']
   });
 }
