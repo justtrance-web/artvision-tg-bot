@@ -15,7 +15,7 @@ const ASANA_PROJECT = process.env.ASANA_PROJECT || '1212305892582815';
 const ADMIN_IDS = (process.env.ADMIN_IDS || '161261562,161261652').split(',').map(Number);
 
 // ✅ ИСПРАВЛЕНО: теперь берёт из ENV или использует Vercel URL
-const PORTAL_URL = process.env.PORTAL_URL || 'https://artvision-portal.vercel.app';
+const PORTAL_URL = process.env.PORTAL_URL || 'https://portal.artvision.pro';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const ASANA_API = 'https://app.asana.com/api/1.0';
 
