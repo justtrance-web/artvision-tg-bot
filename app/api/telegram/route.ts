@@ -1,7 +1,8 @@
 /**
- * Artvision Bot v2.2
- * + /positions - позиции сайтов
- * + /myid - узнать свой Telegram ID
+ * Artvision Bot v2.3
+ * + Mini App интеграция
+ * + Inline кнопки
+ * + Позиции сайтов
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -10,8 +11,9 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const ASANA_TOKEN = process.env.ASANA_TOKEN || '';
 const ASANA_WORKSPACE = process.env.ASANA_WORKSPACE || '860693669973770';
 const ASANA_PROJECT = process.env.ASANA_PROJECT || '1212305892582815';
-const ADMIN_IDS = (process.env.ADMIN_IDS || '161261562').split(',').map(Number);
+const ADMIN_IDS = (process.env.ADMIN_IDS || '161261562,161261652').split(',').map(Number);
 
+const PORTAL_URL = 'https://portal.artvision.pro';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const ASANA_API = 'https://app.asana.com/api/1.0';
 
@@ -19,15 +21,39 @@ const ASANA_API = 'https://app.asana.com/api/1.0';
 // TELEGRAM API
 // ═══════════════════════════════════════════════════════════════
 
-async function sendMessage(chatId: number, text: string) {
+interface InlineButton {
+  text: string;
+  url?: string;
+  web_app?: { url: string };
+  callback_data?: string;
+}
+
+async function sendMessage(chatId: number, text: string, buttons?: InlineButton[][]) {
+  const body: any = {
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true
+  };
+  
+  if (buttons) {
+    body.reply_markup = { inline_keyboard: buttons };
+  }
+  
   await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+}
+
+async function answerCallback(callbackId: string, text?: string) {
+  await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true
+      callback_query_id: callbackId,
+      text: text || ''
     })
   });
 }
@@ -69,21 +95,32 @@ async function getWorkspaceUsers() {
 // ═══════════════════════════════════════════════════════════════
 
 async function handleStart(chatId: number, userName: string) {
-  const text = `👋 Привет, ${userName}!
+  const text = `👋 Привет, <b>${userName}</b>!
 
-Я бот <b>Artvision Portal</b>.
+Я бот <b>Artvision Portal</b> — твой помощник в управлении проектами.
 
-<b>Команды:</b>
+<b>📋 Команды:</b>
 /tasks — Задачи без сроков/исполнителей
 /overdue — Просроченные задачи  
 /week — Задачи на неделю
 /positions — Позиции сайтов
-/workload — Загрузка команды (админы)
-/myid — Узнать свой Telegram ID
+/workload — Загрузка команды
 
-🔗 <a href="https://portal.artvision.pro">Открыть портал</a>`;
+<b>🚀 Быстрый доступ:</b>`;
   
-  await sendMessage(chatId, text);
+  const buttons: InlineButton[][] = [
+    [{ text: '🌐 Открыть портал', web_app: { url: PORTAL_URL } }],
+    [
+      { text: '📋 Задачи', callback_data: 'cmd_tasks' },
+      { text: '📅 Неделя', callback_data: 'cmd_week' }
+    ],
+    [
+      { text: '🔴 Просрочено', callback_data: 'cmd_overdue' },
+      { text: '📊 Загрузка', callback_data: 'cmd_workload' }
+    ]
+  ];
+  
+  await sendMessage(chatId, text, buttons);
 }
 
 async function handleTasks(chatId: number) {
@@ -111,7 +148,11 @@ async function handleTasks(chatId: number) {
     text = '✅ Все задачи имеют сроки и исполнителей!';
   }
   
-  await sendMessage(chatId, text);
+  const buttons: InlineButton[][] = [
+    [{ text: '🌐 Все задачи в портале', web_app: { url: `${PORTAL_URL}/tasks` } }]
+  ];
+  
+  await sendMessage(chatId, text, buttons);
 }
 
 async function handleOverdue(chatId: number) {
@@ -134,7 +175,12 @@ async function handleOverdue(chatId: number) {
   await sendMessage(chatId, text);
 }
 
-async function handleWorkload(chatId: number) {
+async function handleWorkload(chatId: number, isAdmin: boolean, userId: number) {
+  if (!isAdmin) {
+    await sendMessage(chatId, `⛔ Эта команда только для админов\n\nТвой ID: <code>${userId}</code>`);
+    return;
+  }
+  
   const users = await getWorkspaceUsers();
   
   let text = '📊 <b>Загрузка команды:</b>\n\n';
@@ -187,22 +233,26 @@ async function handleWeek(chatId: number) {
     text = '📅 На ближайшую неделю задач не запланировано';
   }
   
-  await sendMessage(chatId, text);
+  const buttons: InlineButton[][] = [
+    [{ text: '📅 Календарь в портале', web_app: { url: `${PORTAL_URL}/calendar` } }]
+  ];
+  
+  await sendMessage(chatId, text, buttons);
 }
 
 async function handlePositions(chatId: number) {
-  // Данные о позициях — пока заглушка, потом подключим API
   const text = `📊 <b>Позиции сайтов</b>
 
 Данные из Яндекс.Вебмастер скоро будут доступны.
 
-Пока можете посмотреть в портале:
-🔗 <a href="https://portal.artvision.pro">Открыть портал</a>
-
-Или в таблице:
-📋 <a href="https://docs.google.com/spreadsheets/d/17a-IY...">Google Sheets</a>`;
+Пока можете посмотреть позиции в портале:`;
   
-  await sendMessage(chatId, text);
+  const buttons: InlineButton[][] = [
+    [{ text: '📈 Позиции в портале', web_app: { url: `${PORTAL_URL}/positions` } }],
+    [{ text: '📋 Google Sheets', url: 'https://docs.google.com/spreadsheets/d/17a-IY' }]
+  ];
+  
+  await sendMessage(chatId, text, buttons);
 }
 
 async function handleMyId(chatId: number, userId: number, userName: string) {
@@ -217,6 +267,18 @@ ${isAdmin ? '✅ Ты админ бота' : '❌ Ты не админ бота'
   await sendMessage(chatId, text);
 }
 
+async function handlePortal(chatId: number) {
+  const text = `🌐 <b>Artvision Portal</b>
+
+Твой персональный портал для управления проектами:`;
+  
+  const buttons: InlineButton[][] = [
+    [{ text: '🚀 Открыть портал', web_app: { url: PORTAL_URL } }]
+  ];
+  
+  await sendMessage(chatId, text, buttons);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ПАРСЕР КОМАНД
 // ═══════════════════════════════════════════════════════════════
@@ -228,10 +290,48 @@ function parseCommand(text: string): string | null {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// CALLBACK HANDLER
+// ═══════════════════════════════════════════════════════════════
+
+async function processCallback(callback: any) {
+  const callbackId = callback.id;
+  const chatId = callback.message?.chat?.id;
+  const userId = callback.from?.id;
+  const data = callback.data;
+  
+  if (!chatId || !data) return;
+  
+  await answerCallback(callbackId);
+  
+  const isAdmin = ADMIN_IDS.includes(userId);
+  
+  switch (data) {
+    case 'cmd_tasks':
+      await handleTasks(chatId);
+      break;
+    case 'cmd_week':
+      await handleWeek(chatId);
+      break;
+    case 'cmd_overdue':
+      await handleOverdue(chatId);
+      break;
+    case 'cmd_workload':
+      await handleWorkload(chatId, isAdmin, userId);
+      break;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // WEBHOOK HANDLER
 // ═══════════════════════════════════════════════════════════════
 
 async function processUpdate(update: any) {
+  // Callback query (кнопки)
+  if (update.callback_query) {
+    await processCallback(update.callback_query);
+    return;
+  }
+  
   const message = update.message;
   if (!message) return;
   
@@ -261,11 +361,7 @@ async function processUpdate(update: any) {
       await handleOverdue(chatId);
       break;
     case '/workload':
-      if (isAdmin) {
-        await handleWorkload(chatId);
-      } else {
-        await sendMessage(chatId, `⛔ Эта команда только для админов\n\nТвой ID: <code>${userId}</code>`);
-      }
+      await handleWorkload(chatId, isAdmin, userId);
       break;
     case '/week':
       await handleWeek(chatId);
@@ -276,6 +372,10 @@ async function processUpdate(update: any) {
     case '/myid':
     case '/id':
       await handleMyId(chatId, userId, userName);
+      break;
+    case '/portal':
+    case '/app':
+      await handlePortal(chatId);
       break;
   }
 }
@@ -298,7 +398,8 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({ 
     status: 'Artvision Bot is running!',
-    version: '2.2',
-    commands: ['/start', '/tasks', '/overdue', '/week', '/positions', '/workload', '/myid']
+    version: '2.3',
+    features: ['Mini App', 'Inline Buttons', 'Callbacks'],
+    commands: ['/start', '/tasks', '/overdue', '/week', '/positions', '/workload', '/myid', '/portal']
   });
 }
