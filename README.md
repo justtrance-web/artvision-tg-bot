@@ -1,2 +1,17 @@
-# artvision-tg-bot
-Artvision Telegram Bot - Asana integration
+# Artvision Telegram Bot
+
+🤖 Telegram бот для интеграции с Asana
+
+## Webhook
+`/api/telegram`
+
+## Команды
+- /start — Приветствие
+- /tasks — Задачи без сроков/исполнителей
+- /overdue — Просроченные задачи
+- /workload — Загрузка команды
+- /week — Задачи на неделю
+
+## Bot
+[@avportalbot](https://t.me/avportalbot)
+
