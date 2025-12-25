@@ -81,7 +81,7 @@ async function handleStart(chatId: number, userName: string) {
 /workload — Загрузка команды (админы)
 /myid — Узнать свой Telegram ID
 
-🔗 <a href="https://artvision-portal.vercel.app">Открыть портал</a>`;
+🔗 <a href="https://portal.artvision.pro">Открыть портал</a>`;
   
   await sendMessage(chatId, text);
 }
@@ -197,7 +197,7 @@ async function handlePositions(chatId: number) {
 Данные из Яндекс.Вебмастер скоро будут доступны.
 
 Пока можете посмотреть в портале:
-🔗 <a href="https://artvision-portal.vercel.app">Открыть портал</a>
+🔗 <a href="https://portal.artvision.pro">Открыть портал</a>
 
 Или в таблице:
 📋 <a href="https://docs.google.com/spreadsheets/d/17a-IY...">Google Sheets</a>`;
