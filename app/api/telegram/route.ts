@@ -1,8 +1,9 @@
 /**
- * Artvision Bot v2.3
+ * Artvision Bot v2.4
  * + Mini App интеграция
  * + Inline кнопки
  * + Позиции сайтов
+ * + ENV переменная PORTAL_URL
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -13,7 +14,8 @@ const ASANA_WORKSPACE = process.env.ASANA_WORKSPACE || '860693669973770';
 const ASANA_PROJECT = process.env.ASANA_PROJECT || '1212305892582815';
 const ADMIN_IDS = (process.env.ADMIN_IDS || '161261562,161261652').split(',').map(Number);
 
-const PORTAL_URL = 'https://portal.artvision.pro';
+// ✅ ИСПРАВЛЕНО: теперь берёт из ENV или использует Vercel URL
+const PORTAL_URL = process.env.PORTAL_URL || 'https://artvision-portal.vercel.app';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const ASANA_API = 'https://app.asana.com/api/1.0';
 
@@ -398,8 +400,9 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({ 
     status: 'Artvision Bot is running!',
-    version: '2.3',
-    features: ['Mini App', 'Inline Buttons', 'Callbacks'],
+    version: '2.4',
+    portal_url: PORTAL_URL,
+    features: ['Mini App', 'Inline Buttons', 'Callbacks', 'ENV Config'],
     commands: ['/start', '/tasks', '/overdue', '/week', '/positions', '/workload', '/myid', '/portal']
   });
 }
