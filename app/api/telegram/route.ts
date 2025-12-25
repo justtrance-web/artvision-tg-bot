@@ -10,7 +10,7 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const ASANA_TOKEN = process.env.ASANA_TOKEN || '';
 const ASANA_WORKSPACE = process.env.ASANA_WORKSPACE || '860693669973770';
 const ASANA_PROJECT = process.env.ASANA_PROJECT || '1212305892582815';
-const ADMIN_IDS = (process.env.ADMIN_IDS || '161261652').split(',').map(Number);
+const ADMIN_IDS = (process.env.ADMIN_IDS || '161261562').split(',').map(Number);
 
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const ASANA_API = 'https://app.asana.com/api/1.0';
