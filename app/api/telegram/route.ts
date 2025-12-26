@@ -21,6 +21,9 @@ const PORTAL_URL = process.env.PORTAL_URL || 'https://portal.artvision.pro';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const ASANA_API = 'https://app.asana.com/api/1.0';
 
+// Хранилище активных пользователей ожидающих ответа
+const awaitingResponse = new Set<number>();
+
 // ═══════════════════════════════════════════════════════════════
 // TELEGRAM API
 // ═══════════════════════════════════════════════════════════════
@@ -254,7 +257,7 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
 
 → ЭТО ЗАПРОС НА ИЗМЕНЕНИЕ КОДА! Верни action:"edit_code"
 
-Существующие команды: /tasks, /overdue, /week, /positions, /workload, /myid
+Существующие команды: /tasks, /overdue, /week, /positions, /workload, /myid, /ответ
 
 Верни ТОЛЬКО JSON (без текста вокруг):
 
@@ -265,7 +268,7 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
 {"action":"create_task","name":"название задачи"}
 
 3. Простой ответ:
-{"action":"reply","text":"ответ"}
+{"action":"ответ","text":"ответ"}
 
 4. ИЗМЕНИТЬ КОД БОТА (для новых команд/функций):
 {"action":"edit_code","repo":"Justtrance-web/artvision-tg-bot","path":"app/api/telegram/route.ts","description":"добавить команду /time","changes":"новая команда /time которая показывает текущее время в формате HH:MM"}
@@ -273,12 +276,12 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
 ПРАВИЛО: Если просят добавить/создать/сделать команду — ВСЕГДА возвращай edit_code!`
         : `Ты — помощник Artvision Portal. Пользователь: ${userName}.
 
-Команды: /tasks, /overdue, /week, /positions, /workload
+Команды: /tasks, /overdue, /week, /positions, /workload, /ответ
 
 Верни JSON:
 - Команда: {"action":"command","command":"/tasks"}
 - Создать задачу: {"action":"create_task","name":"название"}
-- Ответ: {"action":"reply","text":"ответ"}`;
+- Ответ: {"action":"ответ","text":"ответ"}`;
 
       const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -317,6 +320,7 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
             else if (cmd === '/positions') await handlePositions(chatId);
             else if (cmd === '/workload') await handleWorkload(chatId, isAdmin, userId);
             else if (cmd === '/myid' || cmd === '/id') await handleMyId(chatId, userId, userName);
+            else if (cmd === '/ответ') await handleOtvet(chatId, userId);
             return;
           }
           
@@ -332,7 +336,7 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
           }
           
           // Простой ответ
-          if (parsed.action === 'reply') {
+          if (parsed.action === 'ответ') {
             await sendMessage(chatId, `🎙 "${recognizedText}"\n\n${parsed.text}`);
             return;
           }
@@ -411,7 +415,7 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
         } catch (parseError) {
           console.error('[Voice] JSON parse error:', parseError, 'Response:', response);
           // Если не JSON — покажем что распознали
-          await sendMessage(chatId, `🎙 "${recognizedText}"\n\n⚠️ Не понял команду. Скажи например:\n• "покажи задачи"\n• "создай задачу купить молоко"\n• "добавь команду /time"`);
+          await sendMessage(chatId, `🎙 "${recognizedText}"\n\n⚠️ Не понял команду. Скажи например:\n• "покажи задачи"\n• "создай задачу купить молоко"\n• "добавь команду /time"\n• "ответ" (для диалога)`);
           return;
         }
       }
@@ -428,8 +432,11 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
     } else if (text.includes('недел')) {
       await sendMessage(chatId, `🎙 "${recognizedText}" → /week`);
       await handleWeek(chatId);
+    } else if (text.includes('ответ')) {
+      await sendMessage(chatId, `🎙 "${recognizedText}" → /ответ`);
+      await handleOtvet(chatId, userId);
     } else {
-      await sendMessage(chatId, `🎙 "${recognizedText}"\n\nНе понял. Попробуй: задачи, просроченные, неделя`);
+      await sendMessage(chatId, `🎙 "${recognizedText}"\n\nНе понял. Попробуй: задачи, просроченные, неделя, ответ`);
     }
     
   } catch (error) {
@@ -451,11 +458,13 @@ async function handleStart(chatId: number, userName: string) {
 /week — На неделю
 /positions — Позиции
 /workload — Загрузка
+/ответ — Диалог с ботом
 
 <b>🎙 Голос:</b>
 • "покажи задачи"
 • "создай задачу..."
-• "добавь команду /time" (админ)`;
+• "добавь команду /time" (админ)
+• "ответ" (диалог)`;
   
   const buttons: InlineButton[][] = [
     [{ text: '🌐 Портал', web_app: { url: PORTAL_URL } }],
@@ -561,6 +570,52 @@ async function handleMyId(chatId: number, userId: number, userName: string) {
   await sendMessage(chatId, `🆔 ID: <code>${userId}</code>\n👤 ${userName}\n${isAdmin ? '✅ Админ (можешь менять код голосом)' : '👤 Обычный пользователь'}`);
 }
 
+async function handleOtvet(chatId: number, userId: number) {
+  awaitingResponse.add(userId);
+  
+  // Автоматическое удаление из ожидания через 5 минут
+  setTimeout(() => {
+    awaitingResponse.delete(userId);
+  }, 5 * 60 * 1000);
+  
+  await sendMessage(chatId, '🎯 <b>Режим диалога активирован!</b>\n\nТеперь отправь любое сообщение или голосовое, и я отвечу.\n\n<i>Автоотключение через 5 минут</i>');
+}
+
+async function handleDialogMessage(chatId: number, userId: number, userName: string, text: string) {
+  if (!ANTHROPIC_API_KEY) {
+    await sendMessage(chatId, '⚠️ Anthropic API не настроен для диалога');
+    return;
+  }
+  
+  try {
+    const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1024,
+        system: `Ты — помощник Artvision Portal. Отвечай дружелюбно и кратко. Пользователь: ${userName}. Ты можешь помочь с задачами проекта, общими вопросами.`,
+        messages: [{ role: 'user', content: text }]
+      })
+    });
+    
+    if (claudeResp.ok) {
+      const claudeData = await claudeResp.json();
+      const response = claudeData.content?.[0]?.text || 'Извини, не смог ответить';
+      await sendMessage(chatId, `💬 ${response}\n\n<i>Режим диалога активен. Отправь ещё сообщение или /ответ для выхода</i>`);
+    } else {
+      await sendMessage(chatId, '❌ Ошибка получения ответа от Claude');
+    }
+  } catch (error) {
+    console.error('[Dialog] Error:', error);
+    await sendMessage(chatId, '❌ Ошибка диалога');
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ROUTER
 // ═══════════════════════════════════════════════════════════════
@@ -603,13 +658,79 @@ async function processUpdate(update: any) {
   // Голосовые
   if (message.voice) {
     console.log(`[Bot] Voice from ${userName} (${userId})`);
+    
+    // Если пользователь в режиме ожидания ответа, обрабатываем голосовое как диалог
+    if (awaitingResponse.has(userId)) {
+      // Распознаём голос и отправляем в диалог
+      if (!YANDEX_API_KEY) {
+        await sendMessage(chatId, '⚠️ Yandex SpeechKit не настроен.');
+        return;
+      }
+      
+      try {
+        const fileResp = await fetch(`${TELEGRAM_API}/getFile?file_id=${message.voice.file_id}`);
+        const fileData = await fileResp.json();
+        
+        if (fileData.ok) {
+          const filePath = fileData.result.file_path;
+          const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+          
+          const audioResp = await fetch(fileUrl);
+          const audioBuffer = await audioResp.arrayBuffer();
+          
+          const speechResp = await fetch(
+            `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?folderId=${YANDEX_FOLDER_ID}&lang=ru-RU`,
+            {
+              method: 'POST',
+              headers: {
+                'Authorization': `Api-Key ${YANDEX_API_KEY}`,
+                'Content-Type': 'audio/ogg'
+              },
+              body: audioBuffer
+            }
+          );
+          
+          if (speechResp.ok) {
+            const speechData = await speechResp.json();
+            const recognizedText = speechData.result || '';
+            
+            if (recognizedText) {
+              console.log('[Dialog] Voice recognized:', recognizedText);
+              await handleDialogMessage(chatId, userId, userName, recognizedText);
+            } else {
+              await sendMessage(chatId, '❌ Не удалось распознать голосовое');
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[Dialog] Voice processing error:', error);
+        await sendMessage(chatId, '❌ Ошибка обработки голосового');
+      }
+      return;
+    }
+    
     await handleVoice(chatId, message.voice.file_id, userId, userName);
     return;
   }
   
   const text = message.text || '';
+  
+  // Если пользователь в режиме ожидания ответа и это не команда
+  if (awaitingResponse.has(userId) && !text.startsWith('/')) {
+    console.log(`[Dialog] Text from ${userName}: ${text}`);
+    await handleDialogMessage(chatId, userId, userName, text);
+    return;
+  }
+  
   const command = parseCommand(text);
   if (!command) return;
+  
+  // Если команда /ответ и пользователь уже в режиме диалога - выходим
+  if (command === '/ответ' && awaitingResponse.has(userId)) {
+    awaitingResponse.delete(userId);
+    await sendMessage(chatId, '❌ <b>Режим диалога отключён</b>\n\nДля активации снова используй /ответ');
+    return;
+  }
   
   const isAdmin = ADMIN_IDS.includes(userId);
   console.log(`[Bot] ${command} from ${userName}`);
@@ -631,6 +752,8 @@ async function processUpdate(update: any) {
     case '/myid':
     case '/id':
       await handleMyId(chatId, userId, userName); break;
+    case '/ответ':
+      await handleOtvet(chatId, userId); break;
   }
 }
 
@@ -649,6 +772,6 @@ export async function GET() {
   return NextResponse.json({ 
     status: 'running',
     version: '2.9',
-    features: ['Voice STT', 'Voice Code Edit', 'Asana', 'Mini App']
+    features: ['Voice STT', 'Voice Code Edit', 'Asana', 'Mini App', 'Dialog Mode']
   });
 }
