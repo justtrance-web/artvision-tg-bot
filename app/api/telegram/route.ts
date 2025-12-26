@@ -1,9 +1,8 @@
 /**
- * Artvision Bot v2.8
+ * Artvision Bot v2.9
  * + Голосовые: Yandex SpeechKit (STT) + Claude (понимание)
- * + 🆕 Голосовое управление кодом через GitHub
+ * + Голосовое управление кодом через GitHub (улучшенное распознавание)
  * + Mini App интеграция
- * + Inline кнопки
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -64,7 +63,7 @@ async function answerCallback(callbackId: string, text?: string) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// GITHUB API - для голосового управления кодом
+// GITHUB API
 // ═══════════════════════════════════════════════════════════════
 
 interface GitHubFile {
@@ -180,7 +179,7 @@ async function createAsanaTask(name: string): Promise<any> {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// VOICE: Yandex SpeechKit (STT) + Claude (понимание + код)
+// VOICE HANDLER
 // ═══════════════════════════════════════════════════════════════
 
 async function handleVoice(chatId: number, fileId: string, userId: number, userName: string) {
@@ -240,34 +239,46 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
     
     console.log('[Voice] Recognized:', recognizedText);
     
-    // 4. Claude для понимания (с возможностью изменения кода для админов)
+    // 4. Claude для понимания
     if (ANTHROPIC_API_KEY) {
+      // УЛУЧШЕННЫЙ ПРОМПТ для распознавания намерения изменить код
       const systemPrompt = isAdmin && GITHUB_TOKEN 
-        ? `Ты — помощник Artvision Portal с возможностью изменения кода. Пользователь: ${userName} (админ).
+        ? `Ты — помощник Artvision Portal. Пользователь: ${userName} (АДМИН с правами изменения кода).
 
-Команды: /tasks, /overdue, /week, /positions, /workload.
+ВАЖНО: Ты можешь изменять код бота! Если пользователь просит:
+- "добавь команду", "создай команду", "сделай команду"
+- "добавь функцию", "создай функцию"  
+- "измени", "поменяй", "обнови"
+- "команда /что-то которая делает..."
+- любой запрос про новую функциональность бота
 
-Верни JSON:
-- Команда: {"action":"command","command":"/tasks"}
-- Создать задачу: {"action":"create_task","name":"название"}
-- Ответ: {"action":"reply","text":"ответ"}
-- 🆕 Изменить код: {"action":"edit_code","repo":"justtrance-web/artvision-tg-bot","path":"app/api/telegram/route.ts","description":"описание изменения","changes":"что добавить/изменить"}
+→ ЭТО ЗАПРОС НА ИЗМЕНЕНИЕ КОДА! Верни action:"edit_code"
 
-Примеры изменений кода:
-- "добавь команду /stats" → генерируй JSON с action:"edit_code"
-- "измени приветствие" → генерируй JSON с action:"edit_code"
+Существующие команды: /tasks, /overdue, /week, /positions, /workload, /myid
 
-Только JSON.`
+Верни ТОЛЬКО JSON (без текста вокруг):
+
+1. Выполнить существующую команду:
+{"action":"command","command":"/tasks"}
+
+2. Создать задачу в Asana:
+{"action":"create_task","name":"название задачи"}
+
+3. Простой ответ:
+{"action":"reply","text":"ответ"}
+
+4. ИЗМЕНИТЬ КОД БОТА (для новых команд/функций):
+{"action":"edit_code","repo":"Justtrance-web/artvision-tg-bot","path":"app/api/telegram/route.ts","description":"добавить команду /time","changes":"новая команда /time которая показывает текущее время в формате HH:MM"}
+
+ПРАВИЛО: Если просят добавить/создать/сделать команду — ВСЕГДА возвращай edit_code!`
         : `Ты — помощник Artvision Portal. Пользователь: ${userName}.
 
-Команды: /tasks (задачи без сроков), /overdue (просроченные), /week (на неделю), /positions (позиции), /workload (загрузка).
+Команды: /tasks, /overdue, /week, /positions, /workload
 
 Верни JSON:
 - Команда: {"action":"command","command":"/tasks"}
 - Создать задачу: {"action":"create_task","name":"название"}
-- Ответ: {"action":"reply","text":"ответ"}
-
-Только JSON.`;
+- Ответ: {"action":"reply","text":"ответ"}`;
 
       const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -280,17 +291,23 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
           model: 'claude-sonnet-4-20250514',
           max_tokens: 1024,
           system: systemPrompt,
-          messages: [{ role: 'user', content: `Сказано: "${recognizedText}"` }]
+          messages: [{ role: 'user', content: `Голосовая команда: "${recognizedText}"` }]
         })
       });
       
       if (claudeResp.ok) {
         const claudeData = await claudeResp.json();
-        const response = claudeData.content?.[0]?.text || '';
+        let response = claudeData.content?.[0]?.text || '';
+        
+        // Убираем markdown если Claude обернул в ```json
+        response = response.replace(/^```json\s*/, '').replace(/\s*```$/, '').trim();
+        
+        console.log('[Voice] Claude response:', response);
         
         try {
           const parsed = JSON.parse(response);
           
+          // Выполнить команду
           if (parsed.action === 'command') {
             await sendMessage(chatId, `🎙 "${recognizedText}" → ${parsed.command}`);
             const cmd = parsed.command;
@@ -299,25 +316,30 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
             else if (cmd === '/week') await handleWeek(chatId);
             else if (cmd === '/positions') await handlePositions(chatId);
             else if (cmd === '/workload') await handleWorkload(chatId, isAdmin, userId);
+            else if (cmd === '/myid' || cmd === '/id') await handleMyId(chatId, userId, userName);
             return;
           }
           
+          // Создать задачу
           if (parsed.action === 'create_task' && parsed.name) {
             const task = await createAsanaTask(parsed.name);
             if (task) {
               await sendMessage(chatId, `🎙 "${recognizedText}"\n\n✅ Задача: <b>${parsed.name}</b>\n🔗 https://app.asana.com/0/${ASANA_PROJECT}/${task.gid}`);
+            } else {
+              await sendMessage(chatId, '❌ Не удалось создать задачу');
             }
             return;
           }
           
+          // Простой ответ
           if (parsed.action === 'reply') {
             await sendMessage(chatId, `🎙 "${recognizedText}"\n\n${parsed.text}`);
             return;
           }
           
-          // 🆕 Изменение кода через голос
+          // ИЗМЕНЕНИЕ КОДА
           if (parsed.action === 'edit_code' && isAdmin && GITHUB_TOKEN) {
-            await sendMessage(chatId, `🎙 "${recognizedText}"\n\n⚙️ Готовлю изменение кода...`);
+            await sendMessage(chatId, `🎙 "${recognizedText}"\n\n⚙️ Готовлю изменение кода:\n📝 ${parsed.description}`);
             
             const file = await getGitHubFile(parsed.repo, parsed.path);
             if (!file) {
@@ -325,7 +347,7 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
               return;
             }
             
-            // Запрашиваем Claude сгенерировать изменённый код
+            // Claude генерирует новый код
             const codeResp = await fetch('https://api.anthropic.com/v1/messages', {
               method: 'POST',
               headers: {
@@ -335,17 +357,25 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
               },
               body: JSON.stringify({
                 model: 'claude-sonnet-4-20250514',
-                max_tokens: 8000,
-                system: `Ты — эксперт TypeScript/Next.js. Внеси изменения в код.
-Верни ТОЛЬКО изменённый код целиком, без объяснений и markdown.`,
+                max_tokens: 16000,
+                system: `Ты — эксперт TypeScript/Next.js. Внеси изменения в код Telegram бота.
+
+ПРАВИЛА:
+1. Верни ТОЛЬКО полный изменённый код
+2. Без markdown, без \`\`\`, без объяснений
+3. Сохрани всю существующую функциональность
+4. Добавь новую функцию/команду согласно запросу
+5. Если добавляешь команду, добавь её в switch/case в processUpdate и создай handler функцию`,
                 messages: [{ 
                   role: 'user', 
-                  content: `Текущий код:\n\`\`\`typescript\n${file.content}\n\`\`\`\n\nЗадача: ${parsed.description}\nИзменения: ${parsed.changes}\n\nВерни полный изменённый код:` 
+                  content: `Текущий код:\n${file.content}\n\n---\nЗадача: ${parsed.description}\nДетали: ${parsed.changes}\n\nВерни полный изменённый код:` 
                 }]
               })
             });
             
             if (!codeResp.ok) {
+              const err = await codeResp.text();
+              console.error('[Voice] Code gen error:', err);
               await sendMessage(chatId, '❌ Ошибка генерации кода');
               return;
             }
@@ -354,10 +384,10 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
             let newCode = codeData.content?.[0]?.text || '';
             
             // Убираем markdown если есть
-            newCode = newCode.replace(/^```typescript\n?/, '').replace(/\n?```$/, '');
+            newCode = newCode.replace(/^```(?:typescript|ts)?\s*\n?/, '').replace(/\n?\s*```$/, '');
             
-            if (newCode.length < 100) {
-              await sendMessage(chatId, '❌ Сгенерированный код слишком короткий');
+            if (newCode.length < 500) {
+              await sendMessage(chatId, `❌ Код слишком короткий (${newCode.length} символов). Что-то пошло не так.`);
               return;
             }
             
@@ -371,37 +401,35 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
             );
             
             if (result.success) {
-              await sendMessage(chatId, `✅ Код изменён!\n\n📝 ${parsed.description}\n🔗 Коммит: ${result.commitSha}\n\n⏳ Vercel деплоит (~30 сек)`);
+              await sendMessage(chatId, `✅ Код изменён!\n\n📝 ${parsed.description}\n🔗 Коммит: <code>${result.commitSha}</code>\n\n⏳ Vercel деплоит (~30 сек)\n\nПосле деплоя попробуй новую команду!`);
             } else {
               await sendMessage(chatId, `❌ Ошибка коммита: ${result.error}`);
             }
             return;
           }
-        } catch (e) {
-          // Не JSON — покажем как есть
+          
+        } catch (parseError) {
+          console.error('[Voice] JSON parse error:', parseError, 'Response:', response);
+          // Если не JSON — покажем что распознали
+          await sendMessage(chatId, `🎙 "${recognizedText}"\n\n⚠️ Не понял команду. Скажи например:\n• "покажи задачи"\n• "создай задачу купить молоко"\n• "добавь команду /time"`);
+          return;
         }
       }
     }
     
-    // Fallback: простой парсер
+    // Fallback без Claude
     const text = recognizedText.toLowerCase();
     if (text.includes('задач') || text.includes('таск')) {
       await sendMessage(chatId, `🎙 "${recognizedText}" → /tasks`);
       await handleTasks(chatId);
-    } else if (text.includes('просроч') || text.includes('overdue')) {
+    } else if (text.includes('просроч')) {
       await sendMessage(chatId, `🎙 "${recognizedText}" → /overdue`);
       await handleOverdue(chatId);
-    } else if (text.includes('недел') || text.includes('week')) {
+    } else if (text.includes('недел')) {
       await sendMessage(chatId, `🎙 "${recognizedText}" → /week`);
       await handleWeek(chatId);
-    } else if (text.includes('позици')) {
-      await sendMessage(chatId, `🎙 "${recognizedText}" → /positions`);
-      await handlePositions(chatId);
-    } else if (text.includes('загрузк') || text.includes('workload')) {
-      await sendMessage(chatId, `🎙 "${recognizedText}" → /workload`);
-      await handleWorkload(chatId, isAdmin, userId);
     } else {
-      await sendMessage(chatId, `🎙 Распознано: "${recognizedText}"\n\nНе понял команду. Попробуй: задачи, просроченные, неделя, позиции.`);
+      await sendMessage(chatId, `🎙 "${recognizedText}"\n\nНе понял. Попробуй: задачи, просроченные, неделя`);
     }
     
   } catch (error) {
@@ -418,14 +446,16 @@ async function handleStart(chatId: number, userName: string) {
   const text = `👋 Привет, <b>${userName}</b>!
 
 <b>📋 Команды:</b>
-/tasks — Задачи без сроков/исполнителей
+/tasks — Задачи без сроков
 /overdue — Просроченные
 /week — На неделю
-/positions — Позиции сайтов
-/workload — Загрузка команды
+/positions — Позиции
+/workload — Загрузка
 
-<b>🎙 Голос:</b> Отправь голосовое!
-<b>🆕 Админы:</b> Можно менять код голосом`;
+<b>🎙 Голос:</b>
+• "покажи задачи"
+• "создай задачу..."
+• "добавь команду /time" (админ)`;
   
   const buttons: InlineButton[][] = [
     [{ text: '🌐 Портал', web_app: { url: PORTAL_URL } }],
@@ -527,7 +557,8 @@ async function handleWorkload(chatId: number, isAdmin: boolean, userId: number) 
 }
 
 async function handleMyId(chatId: number, userId: number, userName: string) {
-  await sendMessage(chatId, `🆔 ID: <code>${userId}</code>\n👤 ${userName}\n${ADMIN_IDS.includes(userId) ? '✅ Админ' : ''}`);
+  const isAdmin = ADMIN_IDS.includes(userId);
+  await sendMessage(chatId, `🆔 ID: <code>${userId}</code>\n👤 ${userName}\n${isAdmin ? '✅ Админ (можешь менять код голосом)' : '👤 Обычный пользователь'}`);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -571,7 +602,7 @@ async function processUpdate(update: any) {
   
   // Голосовые
   if (message.voice) {
-    console.log(`[Bot] Voice from ${userName}`);
+    console.log(`[Bot] Voice from ${userName} (${userId})`);
     await handleVoice(chatId, message.voice.file_id, userId, userName);
     return;
   }
@@ -617,7 +648,7 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({ 
     status: 'running',
-    version: '2.8',
-    features: ['Voice (Yandex STT + Claude)', 'Voice Code Edit', 'Asana', 'Mini App']
+    version: '2.9',
+    features: ['Voice STT', 'Voice Code Edit', 'Asana', 'Mini App']
   });
 }
