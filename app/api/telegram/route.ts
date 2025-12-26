@@ -1,9 +1,9 @@
 /**
- * Artvision Bot v2.4
+ * Artvision Bot v2.6
+ * + Голосовые сообщения через Claude API
  * + Mini App интеграция
  * + Inline кнопки
  * + Позиции сайтов
- * + ENV переменная PORTAL_URL
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -13,8 +13,8 @@ const ASANA_TOKEN = process.env.ASANA_TOKEN || '';
 const ASANA_WORKSPACE = process.env.ASANA_WORKSPACE || '860693669973770';
 const ASANA_PROJECT = process.env.ASANA_PROJECT || '1212305892582815';
 const ADMIN_IDS = (process.env.ADMIN_IDS || '161261562,161261652').split(',').map(Number);
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 
-// ✅ ИСПРАВЛЕНО: теперь берёт из ENV или использует Vercel URL
 const PORTAL_URL = process.env.PORTAL_URL || 'https://portal.artvision.pro';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const ASANA_API = 'https://app.asana.com/api/1.0';
@@ -92,6 +92,174 @@ async function getWorkspaceUsers() {
   return data.data || [];
 }
 
+async function createAsanaTask(name: string, assigneeName?: string): Promise<any> {
+  try {
+    const body: any = {
+      data: {
+        name,
+        workspace: ASANA_WORKSPACE,
+        projects: [ASANA_PROJECT]
+      }
+    };
+    
+    const resp = await fetch(`${ASANA_API}/tasks`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${ASANA_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    
+    const data = await resp.json();
+    return data.data;
+  } catch (error) {
+    console.error('[Asana] Create task error:', error);
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// VOICE HANDLER — Claude API
+// ═══════════════════════════════════════════════════════════════
+
+async function handleVoice(chatId: number, fileId: string, userId: number, userName: string) {
+  const isAdmin = ADMIN_IDS.includes(userId);
+  
+  if (!ANTHROPIC_API_KEY) {
+    await sendMessage(chatId, '⚠️ Claude API не настроен. Добавьте ANTHROPIC_API_KEY в Vercel.');
+    return;
+  }
+  
+  try {
+    // 1. Получаем файл из Telegram
+    const fileResp = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
+    const fileData = await fileResp.json();
+    
+    if (!fileData.ok) {
+      await sendMessage(chatId, '❌ Не удалось получить голосовое сообщение');
+      return;
+    }
+    
+    const filePath = fileData.result.file_path;
+    const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+    
+    // 2. Скачиваем аудио
+    const audioResp = await fetch(fileUrl);
+    const audioBuffer = await audioResp.arrayBuffer();
+    const audioBase64 = Buffer.from(audioBuffer).toString('base64');
+    
+    // 3. Определяем media type (Telegram отдаёт .oga)
+    const mediaType = 'audio/ogg';
+    
+    await sendMessage(chatId, '🎙 Распознаю...');
+    
+    // 4. Отправляем в Claude API
+    const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1024,
+        system: `Ты — голосовой помощник Artvision Portal. Пользователь: ${userName} (${isAdmin ? 'админ' : 'пользователь'}).
+
+Доступные команды:
+- /tasks — задачи без сроков/исполнителей
+- /overdue — просроченные задачи  
+- /week — задачи на неделю
+- /positions — позиции сайтов
+- /workload — загрузка команды (только админ)
+
+Если пользователь просит что-то похожее на команду — верни JSON:
+{"action": "command", "command": "/tasks"}
+
+Если просит создать задачу — верни JSON:
+{"action": "create_task", "name": "название задачи"}
+
+Если обычный вопрос — верни JSON:
+{"action": "reply", "text": "твой ответ"}
+
+ВАЖНО: Отвечай ТОЛЬКО валидным JSON, без markdown и пояснений.`,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Распознай это голосовое сообщение и определи намерение пользователя:'
+            },
+            {
+              type: 'document',
+              source: {
+                type: 'base64',
+                media_type: mediaType,
+                data: audioBase64
+              }
+            }
+          ]
+        }]
+      })
+    });
+    
+    if (!claudeResp.ok) {
+      const error = await claudeResp.text();
+      console.error('[Voice] Claude API error:', error);
+      await sendMessage(chatId, `❌ Ошибка Claude API: ${claudeResp.status}`);
+      return;
+    }
+    
+    const claudeData = await claudeResp.json();
+    const responseText = claudeData.content?.[0]?.text || '';
+    
+    console.log('[Voice] Claude response:', responseText);
+    
+    // 5. Парсим ответ
+    try {
+      const parsed = JSON.parse(responseText);
+      
+      switch (parsed.action) {
+        case 'command':
+          const cmd = parsed.command;
+          if (cmd === '/tasks') await handleTasks(chatId);
+          else if (cmd === '/overdue') await handleOverdue(chatId);
+          else if (cmd === '/week') await handleWeek(chatId);
+          else if (cmd === '/positions') await handlePositions(chatId);
+          else if (cmd === '/workload') await handleWorkload(chatId, isAdmin, userId);
+          else await sendMessage(chatId, `🎙 Понял команду: ${cmd}\n\nНо такой команды нет.`);
+          break;
+          
+        case 'create_task':
+          const taskName = parsed.name;
+          if (taskName) {
+            const task = await createAsanaTask(taskName);
+            if (task) {
+              await sendMessage(chatId, `✅ Задача создана:\n<b>${taskName}</b>\n\n🔗 https://app.asana.com/0/${ASANA_PROJECT}/${task.gid}`);
+            } else {
+              await sendMessage(chatId, `❌ Не удалось создать задачу`);
+            }
+          }
+          break;
+          
+        case 'reply':
+          await sendMessage(chatId, `🎙 ${parsed.text}`);
+          break;
+          
+        default:
+          await sendMessage(chatId, `🎙 ${responseText}`);
+      }
+    } catch (e) {
+      await sendMessage(chatId, `🎙 ${responseText}`);
+    }
+    
+  } catch (error) {
+    console.error('[Voice] Error:', error);
+    await sendMessage(chatId, '❌ Ошибка обработки голосового сообщения');
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // КОМАНДЫ БОТА
 // ═══════════════════════════════════════════════════════════════
@@ -107,6 +275,9 @@ async function handleStart(chatId: number, userName: string) {
 /week — Задачи на неделю
 /positions — Позиции сайтов
 /workload — Загрузка команды
+
+<b>🎙 Голос:</b>
+Отправь голосовое сообщение — я пойму!
 
 <b>🚀 Быстрый доступ:</b>`;
   
@@ -243,14 +414,12 @@ async function handleWeek(chatId: number) {
 }
 
 async function handlePositions(chatId: number) {
-  // Получаем данные из Supabase
   const SUPABASE_URL = process.env.SUPABASE_URL || 'https://gjwdlbwznkwjghquhhyz.supabase.co';
   const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || '';
   
   let text = '📊 <b>Позиции сайтов</b>\n\n';
   
   try {
-    // Получаем позиции с джойном клиентов
     const resp = await fetch(
       `${SUPABASE_URL}/rest/v1/positions?select=query,position,clicks,ctr,client_id,clients(name,domain)&order=position.asc&limit=15`,
       {
@@ -264,7 +433,6 @@ async function handlePositions(chatId: number) {
     const positions = await resp.json();
     
     if (Array.isArray(positions) && positions.length > 0) {
-      // Группируем по клиентам
       const byClient: Record<string, any[]> = {};
       for (const p of positions) {
         const clientName = p.clients?.name || 'Неизвестный';
@@ -326,7 +494,7 @@ async function handlePortal(chatId: number) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ПАРСЕР КОМАНД
+// ПАРСЕР И CALLBACK
 // ═══════════════════════════════════════════════════════════════
 
 function parseCommand(text: string): string | null {
@@ -334,10 +502,6 @@ function parseCommand(text: string): string | null {
   const command = text.split('@')[0].split(' ')[0].toLowerCase();
   return command;
 }
-
-// ═══════════════════════════════════════════════════════════════
-// CALLBACK HANDLER
-// ═══════════════════════════════════════════════════════════════
 
 async function processCallback(callback: any) {
   const callbackId = callback.id;
@@ -384,9 +548,18 @@ async function processUpdate(update: any) {
   const chatId = message.chat?.id;
   const userId = message.from?.id;
   const userName = message.from?.first_name || 'User';
-  const text = message.text || '';
   
-  if (!chatId || !text) return;
+  if (!chatId) return;
+  
+  // ✅ Голосовые сообщения
+  if (message.voice) {
+    console.log(`[Bot] Voice from ${userName} (${userId})`);
+    await handleVoice(chatId, message.voice.file_id, userId, userName);
+    return;
+  }
+  
+  const text = message.text || '';
+  if (!text) return;
   
   const command = parseCommand(text);
   if (!command) return;
@@ -444,9 +617,9 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({ 
     status: 'Artvision Bot is running!',
-    version: '2.5',
+    version: '2.6',
     portal_url: PORTAL_URL,
-    features: ['Mini App', 'Inline Buttons', 'Callbacks', 'ENV Config', 'Supabase Positions'],
+    features: ['Voice Messages', 'Claude API', 'Mini App', 'Inline Buttons', 'Supabase Positions'],
     commands: ['/start', '/tasks', '/overdue', '/week', '/positions', '/workload', '/myid', '/portal']
   });
 }
