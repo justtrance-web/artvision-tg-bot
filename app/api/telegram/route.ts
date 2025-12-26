@@ -257,7 +257,7 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
 
 → ЭТО ЗАПРОС НА ИЗМЕНЕНИЕ КОДА! Верни action:"edit_code"
 
-Существующие команды: /tasks, /overdue, /week, /positions, /workload, /myid, /ответ
+Существующие команды: /tasks, /overdue, /week, /positions, /workload, /myid, /ответ, /time
 
 Верни ТОЛЬКО JSON (без текста вокруг):
 
@@ -276,7 +276,7 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
 ПРАВИЛО: Если просят добавить/создать/сделать команду — ВСЕГДА возвращай edit_code!`
         : `Ты — помощник Artvision Portal. Пользователь: ${userName}.
 
-Команды: /tasks, /overdue, /week, /positions, /workload, /ответ
+Команды: /tasks, /overdue, /week, /positions, /workload, /ответ, /time
 
 Верни JSON:
 - Команда: {"action":"command","command":"/tasks"}
@@ -321,6 +321,7 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
             else if (cmd === '/workload') await handleWorkload(chatId, isAdmin, userId);
             else if (cmd === '/myid' || cmd === '/id') await handleMyId(chatId, userId, userName);
             else if (cmd === '/ответ') await handleOtvet(chatId, userId);
+            else if (cmd === '/time') await handleTime(chatId);
             return;
           }
           
@@ -435,8 +436,11 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
     } else if (text.includes('ответ')) {
       await sendMessage(chatId, `🎙 "${recognizedText}" → /ответ`);
       await handleOtvet(chatId, userId);
+    } else if (text.includes('время') || text.includes('врем')) {
+      await sendMessage(chatId, `🎙 "${recognizedText}" → /time`);
+      await handleTime(chatId);
     } else {
-      await sendMessage(chatId, `🎙 "${recognizedText}"\n\nНе понял. Попробуй: задачи, просроченные, неделя, ответ`);
+      await sendMessage(chatId, `🎙 "${recognizedText}"\n\nНе понял. Попробуй: задачи, просроченные, неделя, ответ, время`);
     }
     
   } catch (error) {
@@ -458,19 +462,24 @@ async function handleStart(chatId: number, userName: string) {
 /week — На неделю
 /positions — Позиции
 /workload — Загрузка
+/time — Время в Москве
 /ответ — Диалог с ботом
 
 <b>🎙 Голос:</b>
 • "покажи задачи"
 • "создай задачу..."
 • "добавь команду /time" (админ)
-• "ответ" (диалог)`;
+• "ответ" (диалог)
+• "время"`;
   
   const buttons: InlineButton[][] = [
     [{ text: '🌐 Портал', web_app: { url: PORTAL_URL } }],
     [
       { text: '📋 Задачи', callback_data: 'cmd_tasks' },
       { text: '📅 Неделя', callback_data: 'cmd_week' }
+    ],
+    [
+      { text: '🕐 Время', callback_data: 'cmd_time' }
     ]
   ];
   
@@ -570,6 +579,22 @@ async function handleMyId(chatId: number, userId: number, userName: string) {
   await sendMessage(chatId, `🆔 ID: <code>${userId}</code>\n👤 ${userName}\n${isAdmin ? '✅ Админ (можешь менять код голосом)' : '👤 Обычный пользователь'}`);
 }
 
+async function handleTime(chatId: number) {
+  const now = new Date();
+  const moscowTime = new Date(now.toLocaleString("en-US", {timeZone: "Europe/Moscow"}));
+  
+  const hours = moscowTime.getHours().toString().padStart(2, '0');
+  const minutes = moscowTime.getMinutes().toString().padStart(2, '0');
+  const day = moscowTime.getDate().toString().padStart(2, '0');
+  const month = (moscowTime.getMonth() + 1).toString().padStart(2, '0');
+  const year = moscowTime.getFullYear();
+  
+  const timeStr = `${hours}:${minutes}`;
+  const dateStr = `${day}.${month}.${year}`;
+  
+  await sendMessage(chatId, `🕐 <b>Время в Москве:</b>\n\n${timeStr} ${dateStr}`);
+}
+
 async function handleOtvet(chatId: number, userId: number) {
   awaitingResponse.add(userId);
   
@@ -638,6 +663,7 @@ async function processCallback(callback: any) {
     case 'cmd_week': await handleWeek(chatId); break;
     case 'cmd_overdue': await handleOverdue(chatId); break;
     case 'cmd_workload': await handleWorkload(chatId, isAdmin, userId); break;
+    case 'cmd_time': await handleTime(chatId); break;
   }
 }
 
@@ -752,6 +778,8 @@ async function processUpdate(update: any) {
     case '/myid':
     case '/id':
       await handleMyId(chatId, userId, userName); break;
+    case '/time':
+      await handleTime(chatId); break;
     case '/ответ':
       await handleOtvet(chatId, userId); break;
   }
@@ -772,6 +800,6 @@ export async function GET() {
   return NextResponse.json({ 
     status: 'running',
     version: '2.9',
-    features: ['Voice STT', 'Voice Code Edit', 'Asana', 'Mini App', 'Dialog Mode']
+    features: ['Voice STT', 'Voice Code Edit', 'Asana', 'Mini App', 'Dialog Mode', 'Time Command']
   });
 }
