@@ -617,9 +617,9 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({ 
     status: 'Artvision Bot is running!',
-    version: '2.6',
+    version: '2.6.1',
     portal_url: PORTAL_URL,
-    features: ['Voice Messages', 'Claude API', 'Mini App', 'Inline Buttons', 'Supabase Positions'],
+    features: ['Voice Messages via Claude API', 'Claude API', 'Mini App', 'Inline Buttons', 'Supabase Positions'],
     commands: ['/start', '/tasks', '/overdue', '/week', '/positions', '/workload', '/myid', '/portal']
   });
 }
