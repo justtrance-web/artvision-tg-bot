@@ -1,5 +1,6 @@
 /**
- * Artvision Bot v2.7
+ * Artvision Bot v2.8
+ * + /log — логирование чатов с тегами
  * + Голосовые: Yandex SpeechKit (STT) + Claude (понимание)
  * + Mini App интеграция
  * + Inline кнопки
@@ -15,6 +16,10 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || '161261562,161261652').split(',').ma
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const YANDEX_API_KEY = process.env.YANDEX_API_KEY || '';
 const YANDEX_FOLDER_ID = process.env.YANDEX_FOLDER_ID || 'b1g3skikcv7e3aehpu26';
+
+// Supabase
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY || '';
 
 const PORTAL_URL = process.env.PORTAL_URL || 'https://portal.artvision.pro';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
@@ -59,6 +64,82 @@ async function answerCallback(callbackId: string, text?: string) {
       text: text || ''
     })
   });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SUPABASE
+// ═══════════════════════════════════════════════════════════════
+
+interface ChatLog {
+  tag?: string;
+  project?: string;
+  title: string;
+  user_id: number;
+  user_name: string;
+  chat_id: number;
+}
+
+async function saveLog(log: ChatLog): Promise<boolean> {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.error('[Supabase] Not configured');
+    return false;
+  }
+  
+  try {
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/chat_logs`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify({
+        tag: log.tag || 'Общее',
+        project: log.project || null,
+        title: log.title,
+        user_id: log.user_id,
+        user_name: log.user_name,
+        chat_id: log.chat_id,
+        created_at: new Date().toISOString()
+      })
+    });
+    
+    if (!resp.ok) {
+      const error = await resp.text();
+      console.error('[Supabase] Error:', resp.status, error);
+      return false;
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('[Supabase] Error:', error);
+    return false;
+  }
+}
+
+async function getLogs(limit = 10): Promise<any[]> {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return [];
+  
+  try {
+    const resp = await fetch(
+      `${SUPABASE_URL}/rest/v1/chat_logs?select=*&order=created_at.desc&limit=${limit}`,
+      {
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+    
+    if (resp.ok) {
+      return await resp.json();
+    }
+    return [];
+  } catch (error) {
+    console.error('[Supabase] Get logs error:', error);
+    return [];
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -192,11 +273,12 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
           max_tokens: 256,
           system: `Ты — помощник Artvision Portal. Пользователь: ${userName}.
 
-Команды: /tasks (задачи без сроков), /overdue (просроченные), /week (на неделю), /positions (позиции), /workload (загрузка).
+Команды: /tasks (задачи без сроков), /overdue (просроченные), /week (на неделю), /positions (позиции), /workload (загрузка), /log (логирование).
 
 Верни JSON:
 - Команда: {"action":"command","command":"/tasks"}
 - Создать задачу: {"action":"create_task","name":"название"}
+- Создать лог: {"action":"log","tag":"Проект","project":"название","title":"описание"}
 - Ответ: {"action":"reply","text":"ответ"}
 
 Только JSON.`,
@@ -219,6 +301,7 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
             else if (cmd === '/week') await handleWeek(chatId);
             else if (cmd === '/positions') await handlePositions(chatId);
             else if (cmd === '/workload') await handleWorkload(chatId, isAdmin, userId);
+            else if (cmd === '/logs') await handleLogs(chatId);
             return;
           }
           
@@ -226,6 +309,27 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
             const task = await createAsanaTask(parsed.name);
             if (task) {
               await sendMessage(chatId, `🎙 "${recognizedText}"\n\n✅ Задача: <b>${parsed.name}</b>\n🔗 https://app.asana.com/0/${ASANA_PROJECT}/${task.gid}`);
+            }
+            return;
+          }
+          
+          if (parsed.action === 'log') {
+            const success = await saveLog({
+              tag: parsed.tag || 'Общее',
+              project: parsed.project,
+              title: parsed.title || recognizedText,
+              user_id: userId,
+              user_name: userName,
+              chat_id: chatId
+            });
+            
+            if (success) {
+              const tagDisplay = parsed.project 
+                ? `[${parsed.tag}: ${parsed.project}]` 
+                : `[${parsed.tag || 'Общее'}]`;
+              await sendMessage(chatId, `🎙 "${recognizedText}"\n\n📝 Лог: <b>${tagDisplay}</b> ${parsed.title || ''}`);
+            } else {
+              await sendMessage(chatId, `❌ Не удалось сохранить лог`);
             }
             return;
           }
@@ -257,8 +361,10 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
     } else if (text.includes('загрузк') || text.includes('workload')) {
       await sendMessage(chatId, `🎙 "${recognizedText}" → /workload`);
       await handleWorkload(chatId, isAdmin, userId);
+    } else if (text.includes('лог') || text.includes('запиши')) {
+      await sendMessage(chatId, `🎙 "${recognizedText}"\n\nИспользуй: /log [Проект: название] описание`);
     } else {
-      await sendMessage(chatId, `🎙 Распознано: "${recognizedText}"\n\nНе понял команду. Попробуй: задачи, просроченные, неделя, позиции.`);
+      await sendMessage(chatId, `🎙 Распознано: "${recognizedText}"\n\nНе понял команду. Попробуй: задачи, просроченные, неделя, позиции, лог.`);
     }
     
   } catch (error) {
@@ -280,6 +386,10 @@ async function handleStart(chatId: number, userName: string) {
 /week — На неделю
 /positions — Позиции сайтов
 /workload — Загрузка команды
+
+<b>📝 Логирование:</b>
+/log [Тег] Описание
+/logs — Последние записи
 
 <b>🎙 Голос:</b> Отправь голосовое!`;
   
@@ -387,6 +497,120 @@ async function handleMyId(chatId: number, userId: number, userName: string) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// /log — ЛОГИРОВАНИЕ ЧАТОВ
+// ═══════════════════════════════════════════════════════════════
+
+function parseLogMessage(text: string): { tag: string; project?: string; title: string } {
+  // Парсим формат: [Проект: название] описание или [Тег] описание
+  const tagMatch = text.match(/^\[([^\]]+)\]\s*(.*)$/);
+  
+  if (tagMatch) {
+    const tagPart = tagMatch[1];
+    const title = tagMatch[2] || '';
+    
+    // Проверяем формат "Проект: название"
+    const projectMatch = tagPart.match(/^(Проект|Project):\s*(.+)$/i);
+    if (projectMatch) {
+      return {
+        tag: 'Проект',
+        project: projectMatch[2].trim(),
+        title: title.trim()
+      };
+    }
+    
+    // Иначе это просто тег
+    return {
+      tag: tagPart.trim(),
+      title: title.trim()
+    };
+  }
+  
+  // Без тега — Общее
+  return {
+    tag: 'Общее',
+    title: text.trim()
+  };
+}
+
+async function handleLog(chatId: number, userId: number, userName: string, messageText: string) {
+  // Убираем команду /log из текста
+  const logText = messageText.replace(/^\/log(@\w+)?\s*/i, '').trim();
+  
+  if (!logText) {
+    await sendMessage(chatId, `📝 <b>Логирование чатов</b>
+
+<b>Формат:</b>
+/log [Проект: название] описание
+/log [Тег] описание  
+/log описание
+
+<b>Примеры:</b>
+<code>/log [Проект: madwave] Семантика для гидрокостюмов</code>
+<code>/log [Портал] Добавил команду /log</code>
+<code>/log [Навык] Обновил seo-audit</code>
+<code>/log Обсудили план на неделю</code>
+
+<b>Теги:</b> Проект, Портал, Навык, Семантика, Общее`);
+    return;
+  }
+  
+  const parsed = parseLogMessage(logText);
+  
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    await sendMessage(chatId, `⚠️ Supabase не настроен. Лог не сохранён.\n\n📝 ${parsed.project ? `[${parsed.tag}: ${parsed.project}]` : `[${parsed.tag}]`} ${parsed.title}`);
+    return;
+  }
+  
+  const success = await saveLog({
+    tag: parsed.tag,
+    project: parsed.project,
+    title: parsed.title,
+    user_id: userId,
+    user_name: userName,
+    chat_id: chatId
+  });
+  
+  if (success) {
+    const tagDisplay = parsed.project 
+      ? `[${parsed.tag}: ${parsed.project}]` 
+      : `[${parsed.tag}]`;
+    await sendMessage(chatId, `✅ Лог сохранён:\n\n📝 <b>${tagDisplay}</b> ${parsed.title}`);
+  } else {
+    await sendMessage(chatId, `❌ Не удалось сохранить лог`);
+  }
+}
+
+async function handleLogs(chatId: number) {
+  const logs = await getLogs(10);
+  
+  if (logs.length === 0) {
+    await sendMessage(chatId, '📝 Логов пока нет');
+    return;
+  }
+  
+  let text = '📝 <b>Последние логи:</b>\n\n';
+  
+  for (const log of logs) {
+    const date = new Date(log.created_at).toLocaleDateString('ru-RU', { 
+      day: '2-digit', 
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+    
+    const tagDisplay = log.project 
+      ? `[${log.tag}: ${log.project}]` 
+      : `[${log.tag}]`;
+    
+    text += `<b>${tagDisplay}</b>\n${log.title}\n<i>${date} • ${log.user_name}</i>\n\n`;
+  }
+  
+  await sendMessage(chatId, text, [
+    [{ text: '📊 Все логи', web_app: { url: `${PORTAL_URL}/logs` } }]
+  ]);
+}
+
+// ═══════════════════════════════════════════════════════════════
 // ROUTER
 // ═══════════════════════════════════════════════════════════════
 
@@ -408,6 +632,7 @@ async function processCallback(callback: any) {
     case 'cmd_week': await handleWeek(chatId); break;
     case 'cmd_overdue': await handleOverdue(chatId); break;
     case 'cmd_workload': await handleWorkload(chatId, isAdmin, userId); break;
+    case 'cmd_logs': await handleLogs(chatId); break;
   }
 }
 
@@ -456,6 +681,10 @@ async function processUpdate(update: any) {
     case '/myid':
     case '/id':
       await handleMyId(chatId, userId, userName); break;
+    case '/log':
+      await handleLog(chatId, userId, userName, text); break;
+    case '/logs':
+      await handleLogs(chatId); break;
   }
 }
 
@@ -473,7 +702,7 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({ 
     status: 'running',
-    version: '2.7',
-    features: ['Voice (Yandex STT + Claude)', 'Asana', 'Mini App']
+    version: '2.8',
+    features: ['Voice (Yandex STT + Claude)', 'Asana', 'Mini App', 'Chat Logs']
   });
 }
