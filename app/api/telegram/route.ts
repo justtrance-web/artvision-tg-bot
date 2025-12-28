@@ -1,28 +1,21 @@
 /**
- * Artvision Bot v2.9
+ * Artvision Bot v3.0
+ * БЕЗ ASANA (временно отключено)
  * + Голосовые: Yandex SpeechKit (STT) + Claude (понимание)
- * + Голосовое управление кодом через GitHub (улучшенное распознавание)
  * + Mini App интеграция
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const ASANA_TOKEN = process.env.ASANA_TOKEN || '';
-const ASANA_WORKSPACE = process.env.ASANA_WORKSPACE || '860693669973770';
-const ASANA_PROJECT = process.env.ASANA_PROJECT || '1212305892582815';
 const ADMIN_IDS = (process.env.ADMIN_IDS || '161261562,161261652').split(',').map(Number);
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const YANDEX_API_KEY = process.env.YANDEX_API_KEY || '';
 const YANDEX_FOLDER_ID = process.env.YANDEX_FOLDER_ID || 'b1g3skikcv7e3aehpu26';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 
-const PORTAL_URL = process.env.PORTAL_URL || 'https://portal.artvision.pro';
+const PORTAL_URL = 'https://artvision-portal.vercel.app/webapp.html';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-const ASANA_API = 'https://app.asana.com/api/1.0';
-
-// Хранилище активных пользователей ожидающих ответа
-const awaitingResponse = new Set<number>();
 
 // ═══════════════════════════════════════════════════════════════
 // TELEGRAM API
@@ -66,7 +59,7 @@ async function answerCallback(callbackId: string, text?: string) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// GITHUB API
+// GITHUB API (для голосового управления кодом)
 // ═══════════════════════════════════════════════════════════════
 
 interface GitHubFile {
@@ -91,13 +84,7 @@ async function getGitHubFile(repo: string, path: string): Promise<GitHubFile | n
   }
 }
 
-async function updateGitHubFile(
-  repo: string, 
-  path: string, 
-  content: string, 
-  sha: string, 
-  message: string
-): Promise<{ success: boolean; commitSha?: string; error?: string }> {
+async function updateGitHubFile(repo: string, path: string, content: string, sha: string, message: string): Promise<boolean> {
   try {
     const resp = await fetch(
       `https://api.github.com/repos/${repo}/contents/${path}`,
@@ -114,106 +101,19 @@ async function updateGitHubFile(
         })
       }
     );
-    
-    if (resp.ok) {
-      const data = await resp.json();
-      return { success: true, commitSha: data.commit?.sha?.slice(0, 8) };
-    }
-    return { success: false, error: `HTTP ${resp.status}` };
-  } catch (error) {
-    return { success: false, error: String(error) };
+    return resp.ok;
+  } catch {
+    return false;
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ASANA API
+// YANDEX SPEECHKIT (STT)
 // ═══════════════════════════════════════════════════════════════
 
-async function getAsanaTasks(projectId?: string, assignee?: string) {
-  const params = new URLSearchParams({
-    opt_fields: 'name,due_on,assignee,assignee.name,completed',
-    completed_since: 'now'
-  });
-  
-  if (projectId) params.set('project', projectId);
-  if (assignee) {
-    params.set('assignee', assignee);
-    params.set('workspace', ASANA_WORKSPACE);
-  }
-
-  const resp = await fetch(`${ASANA_API}/tasks?${params}`, {
-    headers: { Authorization: `Bearer ${ASANA_TOKEN}` }
-  });
-  const data = await resp.json();
-  return data.data || [];
-}
-
-async function getWorkspaceUsers() {
-  const resp = await fetch(
-    `${ASANA_API}/workspaces/${ASANA_WORKSPACE}/users?opt_fields=name,email`,
-    { headers: { Authorization: `Bearer ${ASANA_TOKEN}` } }
-  );
-  const data = await resp.json();
-  return data.data || [];
-}
-
-async function createAsanaTask(name: string): Promise<any> {
+async function recognizeSpeech(audioData: ArrayBuffer): Promise<string> {
   try {
-    const resp = await fetch(`${ASANA_API}/tasks`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${ASANA_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        data: {
-          name,
-          workspace: ASANA_WORKSPACE,
-          projects: [ASANA_PROJECT]
-        }
-      })
-    });
-    const data = await resp.json();
-    return data.data;
-  } catch (error) {
-    console.error('[Asana] Create task error:', error);
-    return null;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// VOICE HANDLER
-// ═══════════════════════════════════════════════════════════════
-
-async function handleVoice(chatId: number, fileId: string, userId: number, userName: string) {
-  const isAdmin = ADMIN_IDS.includes(userId);
-  
-  if (!YANDEX_API_KEY) {
-    await sendMessage(chatId, '⚠️ Yandex SpeechKit не настроен.');
-    return;
-  }
-  
-  try {
-    // 1. Получаем файл из Telegram
-    const fileResp = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
-    const fileData = await fileResp.json();
-    
-    if (!fileData.ok) {
-      await sendMessage(chatId, '❌ Не удалось получить голосовое');
-      return;
-    }
-    
-    const filePath = fileData.result.file_path;
-    const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
-    
-    // 2. Скачиваем аудио
-    const audioResp = await fetch(fileUrl);
-    const audioBuffer = await audioResp.arrayBuffer();
-    
-    await sendMessage(chatId, '🎙 Распознаю...');
-    
-    // 3. Yandex SpeechKit STT
-    const speechResp = await fetch(
+    const response = await fetch(
       `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?folderId=${YANDEX_FOLDER_ID}&lang=ru-RU`,
       {
         method: 'POST',
@@ -221,399 +121,30 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
           'Authorization': `Api-Key ${YANDEX_API_KEY}`,
           'Content-Type': 'audio/ogg'
         },
-        body: audioBuffer
+        body: audioData
       }
     );
     
-    if (!speechResp.ok) {
-      const error = await speechResp.text();
-      console.error('[Voice] Yandex STT error:', speechResp.status, error);
-      await sendMessage(chatId, `❌ Ошибка распознавания: ${speechResp.status}`);
-      return;
+    if (!response.ok) {
+      console.error('Yandex STT error:', response.status);
+      return '';
     }
     
-    const speechData = await speechResp.json();
-    const recognizedText = speechData.result || '';
-    
-    if (!recognizedText) {
-      await sendMessage(chatId, '❌ Не удалось распознать речь');
-      return;
-    }
-    
-    console.log('[Voice] Recognized:', recognizedText);
-    
-    // 4. Claude для понимания
-    if (ANTHROPIC_API_KEY) {
-      // УЛУЧШЕННЫЙ ПРОМПТ для распознавания намерения изменить код
-      const systemPrompt = isAdmin && GITHUB_TOKEN 
-        ? `Ты — помощник Artvision Portal. Пользователь: ${userName} (АДМИН с правами изменения кода).
-
-ВАЖНО: Ты можешь изменять код бота! Если пользователь просит:
-- "добавь команду", "создай команду", "сделай команду"
-- "добавь функцию", "создай функцию"  
-- "измени", "поменяй", "обнови"
-- "команда /что-то которая делает..."
-- любой запрос про новую функциональность бота
-
-→ ЭТО ЗАПРОС НА ИЗМЕНЕНИЕ КОДА! Верни action:"edit_code"
-
-Существующие команды: /tasks, /overdue, /week, /positions, /workload, /myid, /ответ, /time
-
-Верни ТОЛЬКО JSON (без текста вокруг):
-
-1. Выполнить существующую команду:
-{"action":"command","command":"/tasks"}
-
-2. Создать задачу в Asana:
-{"action":"create_task","name":"название задачи"}
-
-3. Простой ответ:
-{"action":"ответ","text":"ответ"}
-
-4. ИЗМЕНИТЬ КОД БОТА (для новых команд/функций):
-{"action":"edit_code","repo":"Justtrance-web/artvision-tg-bot","path":"app/api/telegram/route.ts","description":"добавить команду /time","changes":"новая команда /time которая показывает текущее время в формате HH:MM"}
-
-ПРАВИЛО: Если просят добавить/создать/сделать команду — ВСЕГДА возвращай edit_code!`
-        : `Ты — помощник Artvision Portal. Пользователь: ${userName}.
-
-Команды: /tasks, /overdue, /week, /positions, /workload, /ответ, /time
-
-Верни JSON:
-- Команда: {"action":"command","command":"/tasks"}
-- Создать задачу: {"action":"create_task","name":"название"}
-- Ответ: {"action":"ответ","text":"ответ"}`;
-
-      const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1024,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: `Голосовая команда: "${recognizedText}"` }]
-        })
-      });
-      
-      if (claudeResp.ok) {
-        const claudeData = await claudeResp.json();
-        let response = claudeData.content?.[0]?.text || '';
-        
-        // Убираем markdown если Claude обернул в ```json
-        response = response.replace(/^```json\s*/, '').replace(/\s*```$/, '').trim();
-        
-        console.log('[Voice] Claude response:', response);
-        
-        try {
-          const parsed = JSON.parse(response);
-          
-          // Выполнить команду
-          if (parsed.action === 'command') {
-            await sendMessage(chatId, `🎙 "${recognizedText}" → ${parsed.command}`);
-            const cmd = parsed.command;
-            if (cmd === '/tasks') await handleTasks(chatId);
-            else if (cmd === '/overdue') await handleOverdue(chatId);
-            else if (cmd === '/week') await handleWeek(chatId);
-            else if (cmd === '/positions') await handlePositions(chatId);
-            else if (cmd === '/workload') await handleWorkload(chatId, isAdmin, userId);
-            else if (cmd === '/myid' || cmd === '/id') await handleMyId(chatId, userId, userName);
-            else if (cmd === '/ответ') await handleOtvet(chatId, userId);
-            else if (cmd === '/time') await handleTime(chatId);
-            return;
-          }
-          
-          // Создать задачу
-          if (parsed.action === 'create_task' && parsed.name) {
-            const task = await createAsanaTask(parsed.name);
-            if (task) {
-              await sendMessage(chatId, `🎙 "${recognizedText}"\n\n✅ Задача: <b>${parsed.name}</b>\n🔗 https://app.asana.com/0/${ASANA_PROJECT}/${task.gid}`);
-            } else {
-              await sendMessage(chatId, '❌ Не удалось создать задачу');
-            }
-            return;
-          }
-          
-          // Простой ответ
-          if (parsed.action === 'ответ') {
-            await sendMessage(chatId, `🎙 "${recognizedText}"\n\n${parsed.text}`);
-            return;
-          }
-          
-          // ИЗМЕНЕНИЕ КОДА
-          if (parsed.action === 'edit_code' && isAdmin && GITHUB_TOKEN) {
-            await sendMessage(chatId, `🎙 "${recognizedText}"\n\n⚙️ Готовлю изменение кода:\n📝 ${parsed.description}`);
-            
-            const file = await getGitHubFile(parsed.repo, parsed.path);
-            if (!file) {
-              await sendMessage(chatId, '❌ Не удалось получить файл из GitHub');
-              return;
-            }
-            
-            // Claude генерирует новый код
-            const codeResp = await fetch('https://api.anthropic.com/v1/messages', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'x-api-key': ANTHROPIC_API_KEY,
-                'anthropic-version': '2023-06-01'
-              },
-              body: JSON.stringify({
-                model: 'claude-sonnet-4-20250514',
-                max_tokens: 16000,
-                system: `Ты — эксперт TypeScript/Next.js. Внеси изменения в код Telegram бота.
-
-ПРАВИЛА:
-1. Верни ТОЛЬКО полный изменённый код
-2. Без markdown, без \`\`\`, без объяснений
-3. Сохрани всю существующую функциональность
-4. Добавь новую функцию/команду согласно запросу
-5. Если добавляешь команду, добавь её в switch/case в processUpdate и создай handler функцию`,
-                messages: [{ 
-                  role: 'user', 
-                  content: `Текущий код:\n${file.content}\n\n---\nЗадача: ${parsed.description}\nДетали: ${parsed.changes}\n\nВерни полный изменённый код:` 
-                }]
-              })
-            });
-            
-            if (!codeResp.ok) {
-              const err = await codeResp.text();
-              console.error('[Voice] Code gen error:', err);
-              await sendMessage(chatId, '❌ Ошибка генерации кода');
-              return;
-            }
-            
-            const codeData = await codeResp.json();
-            let newCode = codeData.content?.[0]?.text || '';
-            
-            // Убираем markdown если есть
-            newCode = newCode.replace(/^```(?:typescript|ts)?\s*\n?/, '').replace(/\n?\s*```$/, '');
-            
-            if (newCode.length < 500) {
-              await sendMessage(chatId, `❌ Код слишком короткий (${newCode.length} символов). Что-то пошло не так.`);
-              return;
-            }
-            
-            // Коммитим
-            const result = await updateGitHubFile(
-              parsed.repo,
-              parsed.path,
-              newCode,
-              file.sha,
-              `🎙 Voice: ${parsed.description}`
-            );
-            
-            if (result.success) {
-              await sendMessage(chatId, `✅ Код изменён!\n\n📝 ${parsed.description}\n🔗 Коммит: <code>${result.commitSha}</code>\n\n⏳ Vercel деплоит (~30 сек)\n\nПосле деплоя попробуй новую команду!`);
-            } else {
-              await sendMessage(chatId, `❌ Ошибка коммита: ${result.error}`);
-            }
-            return;
-          }
-          
-        } catch (parseError) {
-          console.error('[Voice] JSON parse error:', parseError, 'Response:', response);
-          // Если не JSON — покажем что распознали
-          await sendMessage(chatId, `🎙 "${recognizedText}"\n\n⚠️ Не понял команду. Скажи например:\n• "покажи задачи"\n• "создай задачу купить молоко"\n• "добавь команду /time"\n• "ответ" (для диалога)`);
-          return;
-        }
-      }
-    }
-    
-    // Fallback без Claude
-    const text = recognizedText.toLowerCase();
-    if (text.includes('задач') || text.includes('таск')) {
-      await sendMessage(chatId, `🎙 "${recognizedText}" → /tasks`);
-      await handleTasks(chatId);
-    } else if (text.includes('просроч')) {
-      await sendMessage(chatId, `🎙 "${recognizedText}" → /overdue`);
-      await handleOverdue(chatId);
-    } else if (text.includes('недел')) {
-      await sendMessage(chatId, `🎙 "${recognizedText}" → /week`);
-      await handleWeek(chatId);
-    } else if (text.includes('ответ')) {
-      await sendMessage(chatId, `🎙 "${recognizedText}" → /ответ`);
-      await handleOtvet(chatId, userId);
-    } else if (text.includes('время') || text.includes('врем')) {
-      await sendMessage(chatId, `🎙 "${recognizedText}" → /time`);
-      await handleTime(chatId);
-    } else {
-      await sendMessage(chatId, `🎙 "${recognizedText}"\n\nНе понял. Попробуй: задачи, просроченные, неделя, ответ, время`);
-    }
-    
+    const data = await response.json();
+    return data.result || '';
   } catch (error) {
-    console.error('[Voice] Error:', error);
-    await sendMessage(chatId, '❌ Ошибка обработки голоса');
+    console.error('Speech recognition error:', error);
+    return '';
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// КОМАНДЫ
+// CLAUDE API
 // ═══════════════════════════════════════════════════════════════
 
-async function handleStart(chatId: number, userName: string) {
-  const text = `👋 Привет, <b>${userName}</b>!
-
-<b>📋 Команды:</b>
-/tasks — Задачи без сроков
-/overdue — Просроченные
-/week — На неделю
-/positions — Позиции
-/workload — Загрузка
-/time — Время в Москве
-/ответ — Диалог с ботом
-
-<b>🎙 Голос:</b>
-• "покажи задачи"
-• "создай задачу..."
-• "добавь команду /time" (админ)
-• "ответ" (диалог)
-• "время"`;
-  
-  const buttons: InlineButton[][] = [
-    [{ text: '🌐 Портал', web_app: { url: PORTAL_URL } }],
-    [
-      { text: '📋 Задачи', callback_data: 'cmd_tasks' },
-      { text: '📅 Неделя', callback_data: 'cmd_week' }
-    ],
-    [
-      { text: '🕐 Время', callback_data: 'cmd_time' }
-    ]
-  ];
-  
-  await sendMessage(chatId, text, buttons);
-}
-
-async function handleTasks(chatId: number) {
-  const tasks = await getAsanaTasks(ASANA_PROJECT);
-  const noDue = tasks.filter((t: any) => !t.due_on);
-  const noAssignee = tasks.filter((t: any) => !t.assignee);
-  
-  let text = '📋 <b>Задачи:</b>\n\n';
-  
-  if (noDue.length > 0) {
-    text += `⏰ <b>Без срока (${noDue.length}):</b>\n`;
-    noDue.slice(0, 5).forEach((t: any) => { text += `• ${t.name}\n`; });
-    if (noDue.length > 5) text += `<i>+${noDue.length - 5}</i>\n`;
-    text += '\n';
-  }
-  
-  if (noAssignee.length > 0) {
-    text += `👤 <b>Без исполнителя (${noAssignee.length}):</b>\n`;
-    noAssignee.slice(0, 5).forEach((t: any) => { text += `• ${t.name}\n`; });
-  }
-  
-  if (noDue.length === 0 && noAssignee.length === 0) {
-    text = '✅ Все задачи в порядке!';
-  }
-  
-  await sendMessage(chatId, text);
-}
-
-async function handleOverdue(chatId: number) {
-  const tasks = await getAsanaTasks(ASANA_PROJECT);
-  const today = new Date().toISOString().split('T')[0];
-  const overdue = tasks.filter((t: any) => t.due_on && t.due_on < today);
-  
-  if (overdue.length > 0) {
-    let text = `🔴 <b>Просрочено (${overdue.length}):</b>\n\n`;
-    overdue.slice(0, 10).forEach((t: any) => {
-      text += `• ${t.name}\n  📅 ${t.due_on} | 👤 ${t.assignee?.name || '—'}\n\n`;
-    });
-    await sendMessage(chatId, text);
-  } else {
-    await sendMessage(chatId, '✅ Просроченных нет!');
-  }
-}
-
-async function handleWeek(chatId: number) {
-  const tasks = await getAsanaTasks(ASANA_PROJECT);
-  const today = new Date();
-  const weekEnd = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
-  const todayStr = today.toISOString().split('T')[0];
-  const weekEndStr = weekEnd.toISOString().split('T')[0];
-  
-  const weekTasks = tasks.filter((t: any) => 
-    t.due_on && t.due_on >= todayStr && t.due_on <= weekEndStr
-  );
-  
-  if (weekTasks.length > 0) {
-    let text = `📅 <b>На неделю (${weekTasks.length}):</b>\n\n`;
-    weekTasks.slice(0, 10).forEach((t: any) => {
-      text += `• ${t.name} (${t.due_on})\n`;
-    });
-    await sendMessage(chatId, text);
-  } else {
-    await sendMessage(chatId, '📅 На неделю задач нет');
-  }
-}
-
-async function handlePositions(chatId: number) {
-  await sendMessage(chatId, '📊 Позиции — см. портал', [
-    [{ text: '📈 Открыть', web_app: { url: `${PORTAL_URL}/positions` } }]
-  ]);
-}
-
-async function handleWorkload(chatId: number, isAdmin: boolean, userId: number) {
-  if (!isAdmin) {
-    await sendMessage(chatId, `⛔ Только для админов. Твой ID: ${userId}`);
-    return;
-  }
-  
-  const users = await getWorkspaceUsers();
-  let text = '📊 <b>Загрузка:</b>\n\n';
-  
-  for (const user of users.slice(0, 8)) {
-    const tasks = await getAsanaTasks(undefined, user.gid);
-    const emoji = tasks.length > 10 ? '🔴' : tasks.length > 5 ? '🟡' : '🟢';
-    text += `${emoji} ${user.name}: ${tasks.length}\n`;
-  }
-  
-  await sendMessage(chatId, text);
-}
-
-async function handleMyId(chatId: number, userId: number, userName: string) {
-  const isAdmin = ADMIN_IDS.includes(userId);
-  await sendMessage(chatId, `🆔 ID: <code>${userId}</code>\n👤 ${userName}\n${isAdmin ? '✅ Админ (можешь менять код голосом)' : '👤 Обычный пользователь'}`);
-}
-
-async function handleTime(chatId: number) {
-  const now = new Date();
-  const moscowTime = new Date(now.toLocaleString("en-US", {timeZone: "Europe/Moscow"}));
-  
-  const hours = moscowTime.getHours().toString().padStart(2, '0');
-  const minutes = moscowTime.getMinutes().toString().padStart(2, '0');
-  const day = moscowTime.getDate().toString().padStart(2, '0');
-  const month = (moscowTime.getMonth() + 1).toString().padStart(2, '0');
-  const year = moscowTime.getFullYear();
-  
-  const timeStr = `${hours}:${minutes}`;
-  const dateStr = `${day}.${month}.${year}`;
-  
-  await sendMessage(chatId, `🕐 <b>Время в Москве:</b>\n\n${timeStr} ${dateStr}`);
-}
-
-async function handleOtvet(chatId: number, userId: number) {
-  awaitingResponse.add(userId);
-  
-  // Автоматическое удаление из ожидания через 5 минут
-  setTimeout(() => {
-    awaitingResponse.delete(userId);
-  }, 5 * 60 * 1000);
-  
-  await sendMessage(chatId, '🎯 <b>Режим диалога активирован!</b>\n\nТеперь отправь любое сообщение или голосовое, и я отвечу.\n\n<i>Автоотключение через 5 минут</i>');
-}
-
-async function handleDialogMessage(chatId: number, userId: number, userName: string, text: string) {
-  if (!ANTHROPIC_API_KEY) {
-    await sendMessage(chatId, '⚠️ Anthropic API не настроен для диалога');
-    return;
-  }
-  
+async function askClaude(prompt: string, systemPrompt?: string): Promise<string> {
   try {
-    const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -623,183 +154,272 @@ async function handleDialogMessage(chatId: number, userId: number, userName: str
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1024,
-        system: `Ты — помощник Artvision Portal. Отвечай дружелюбно и кратко. Пользователь: ${userName}. Ты можешь помочь с задачами проекта, общими вопросами.`,
-        messages: [{ role: 'user', content: text }]
+        system: systemPrompt || 'Ты — помощник SEO-агентства Artvision. Отвечай кратко и по делу на русском.',
+        messages: [{ role: 'user', content: prompt }]
       })
     });
     
-    if (claudeResp.ok) {
-      const claudeData = await claudeResp.json();
-      const response = claudeData.content?.[0]?.text || 'Извини, не смог ответить';
-      await sendMessage(chatId, `💬 ${response}\n\n<i>Режим диалога активен. Отправь ещё сообщение или /ответ для выхода</i>`);
-    } else {
-      await sendMessage(chatId, '❌ Ошибка получения ответа от Claude');
-    }
-  } catch (error) {
-    console.error('[Dialog] Error:', error);
-    await sendMessage(chatId, '❌ Ошибка диалога');
+    if (!response.ok) return '';
+    const data = await response.json();
+    return data.content?.[0]?.text || '';
+  } catch {
+    return '';
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ROUTER
+// VOICE HANDLER
 // ═══════════════════════════════════════════════════════════════
 
-function parseCommand(text: string): string | null {
-  if (!text?.startsWith('/')) return null;
-  return text.split('@')[0].split(' ')[0].toLowerCase();
-}
-
-async function processCallback(callback: any) {
-  const chatId = callback.message?.chat?.id;
-  const userId = callback.from?.id;
-  if (!chatId) return;
-  
-  await answerCallback(callback.id);
-  const isAdmin = ADMIN_IDS.includes(userId);
-  
-  switch (callback.data) {
-    case 'cmd_tasks': await handleTasks(chatId); break;
-    case 'cmd_week': await handleWeek(chatId); break;
-    case 'cmd_overdue': await handleOverdue(chatId); break;
-    case 'cmd_workload': await handleWorkload(chatId, isAdmin, userId); break;
-    case 'cmd_time': await handleTime(chatId); break;
-  }
-}
-
-async function processUpdate(update: any) {
-  if (update.callback_query) {
-    await processCallback(update.callback_query);
-    return;
-  }
-  
-  const message = update.message;
-  if (!message) return;
-  
-  const chatId = message.chat?.id;
-  const userId = message.from?.id;
-  const userName = message.from?.first_name || 'User';
-  if (!chatId) return;
-  
-  // Голосовые
-  if (message.voice) {
-    console.log(`[Bot] Voice from ${userName} (${userId})`);
+async function handleVoice(chatId: number, fileId: string, userId: number, userName: string) {
+  try {
+    // 1. Получаем файл
+    const fileResp = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
+    const fileData = await fileResp.json();
     
-    // Если пользователь в режиме ожидания ответа, обрабатываем голосовое как диалог
-    if (awaitingResponse.has(userId)) {
-      // Распознаём голос и отправляем в диалог
-      if (!YANDEX_API_KEY) {
-        await sendMessage(chatId, '⚠️ Yandex SpeechKit не настроен.');
-        return;
-      }
-      
-      try {
-        const fileResp = await fetch(`${TELEGRAM_API}/getFile?file_id=${message.voice.file_id}`);
-        const fileData = await fileResp.json();
-        
-        if (fileData.ok) {
-          const filePath = fileData.result.file_path;
-          const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
-          
-          const audioResp = await fetch(fileUrl);
-          const audioBuffer = await audioResp.arrayBuffer();
-          
-          const speechResp = await fetch(
-            `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?folderId=${YANDEX_FOLDER_ID}&lang=ru-RU`,
-            {
-              method: 'POST',
-              headers: {
-                'Authorization': `Api-Key ${YANDEX_API_KEY}`,
-                'Content-Type': 'audio/ogg'
-              },
-              body: audioBuffer
-            }
-          );
-          
-          if (speechResp.ok) {
-            const speechData = await speechResp.json();
-            const recognizedText = speechData.result || '';
-            
-            if (recognizedText) {
-              console.log('[Dialog] Voice recognized:', recognizedText);
-              await handleDialogMessage(chatId, userId, userName, recognizedText);
-            } else {
-              await sendMessage(chatId, '❌ Не удалось распознать голосовое');
-            }
-          }
-        }
-      } catch (error) {
-        console.error('[Dialog] Voice processing error:', error);
-        await sendMessage(chatId, '❌ Ошибка обработки голосового');
-      }
+    if (!fileData.ok) {
+      await sendMessage(chatId, '❌ Не удалось получить голосовое сообщение');
       return;
     }
     
-    await handleVoice(chatId, message.voice.file_id, userId, userName);
+    const filePath = fileData.result.file_path;
+    const audioResp = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`);
+    const audioBuffer = await audioResp.arrayBuffer();
+    
+    // 2. Распознаём речь
+    const recognizedText = await recognizeSpeech(audioBuffer);
+    
+    if (!recognizedText) {
+      await sendMessage(chatId, '❌ Не удалось распознать речь. Попробуйте ещё раз.');
+      return;
+    }
+    
+    // 3. Анализируем через Claude
+    const analysis = await askClaude(
+      `Пользователь сказал: "${recognizedText}"
+      
+Определи тип запроса:
+1. Если это вопрос про SEO, маркетинг, сайты — ответь на него
+2. Если это запрос на создание задачи — скажи что функция временно недоступна
+3. Если непонятно — попроси уточнить
+
+Отвечай кратко.`,
+      'Ты — голосовой помощник SEO-агентства Artvision.'
+    );
+    
+    await sendMessage(chatId, `🎙 <i>"${recognizedText}"</i>\n\n${analysis}`);
+    
+  } catch (error) {
+    console.error('Voice handler error:', error);
+    await sendMessage(chatId, '❌ Ошибка обработки голосового сообщения');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// COMMAND HANDLERS
+// ═══════════════════════════════════════════════════════════════
+
+async function handleStart(chatId: number, userName: string) {
+  const text = `👋 Привет, ${userName}!
+
+Я бот <b>Artvision</b> — SEO-агентства.
+
+📊 <b>Портал</b> — статистика сайтов
+🎙 <b>Голос</b> — задавайте вопросы голосом
+
+<i>Нажмите кнопку меню для доступа к порталу</i>`;
+
+  await sendMessage(chatId, text, [
+    [
+      { text: '📊 Открыть портал', web_app: { url: PORTAL_URL } }
+    ],
+    [
+      { text: '🕐 Время', callback_data: 'cmd_time' }
+    ]
+  ]);
+}
+
+// ⚠️ ASANA ВРЕМЕННО ОТКЛЮЧЕНА
+async function handleTasks(chatId: number) {
+  await sendMessage(chatId, `⚠️ <b>Функция временно недоступна</b>
+
+Интеграция с Asana на обслуживании.
+
+Используйте приложение Asana напрямую:
+📱 <a href="https://app.asana.com">app.asana.com</a>`, [
+    [{ text: '📊 Открыть портал', web_app: { url: PORTAL_URL } }]
+  ]);
+}
+
+async function handleOverdue(chatId: number) {
+  await sendMessage(chatId, `⚠️ <b>Функция временно недоступна</b>
+
+Интеграция с Asana на обслуживании.`);
+}
+
+async function handleWeek(chatId: number) {
+  await sendMessage(chatId, `⚠️ <b>Функция временно недоступна</b>
+
+Интеграция с Asana на обслуживании.`);
+}
+
+async function handleWorkload(chatId: number, isAdmin: boolean) {
+  if (!isAdmin) {
+    await sendMessage(chatId, '🔒 Только для администраторов');
     return;
   }
-  
-  const text = message.text || '';
-  
-  // Если пользователь в режиме ожидания ответа и это не команда
-  if (awaitingResponse.has(userId) && !text.startsWith('/')) {
-    console.log(`[Dialog] Text from ${userName}: ${text}`);
-    await handleDialogMessage(chatId, userId, userName, text);
-    return;
-  }
-  
-  const command = parseCommand(text);
-  if (!command) return;
-  
-  // Если команда /ответ и пользователь уже в режиме диалога - выходим
-  if (command === '/ответ' && awaitingResponse.has(userId)) {
-    awaitingResponse.delete(userId);
-    await sendMessage(chatId, '❌ <b>Режим диалога отключён</b>\n\nДля активации снова используй /ответ');
-    return;
-  }
-  
+  await sendMessage(chatId, `⚠️ <b>Функция временно недоступна</b>
+
+Интеграция с Asana на обслуживании.`);
+}
+
+async function handlePositions(chatId: number) {
+  await sendMessage(chatId, `📈 <b>Позиции сайтов</b>
+
+Откройте портал для просмотра статистики:`, [
+    [{ text: '📊 Открыть портал', web_app: { url: PORTAL_URL } }]
+  ]);
+}
+
+async function handleMyId(chatId: number, userId: number, userName: string) {
   const isAdmin = ADMIN_IDS.includes(userId);
-  console.log(`[Bot] ${command} from ${userName}`);
+  await sendMessage(chatId, `🆔 <b>Ваш Telegram ID:</b> <code>${userId}</code>\n👤 Имя: ${userName}\n${isAdmin ? '✅ Вы админ' : '❌ Вы не админ'}`);
+}
+
+async function handleTime(chatId: number) {
+  const now = new Date();
+  const msk = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+  const timeStr = msk.toISOString().slice(11, 19);
+  const dateStr = msk.toISOString().slice(0, 10).split('-').reverse().join('.');
   
-  switch (command) {
-    case '/start':
-    case '/help':
-      await handleStart(chatId, userName); break;
-    case '/tasks':
-      await handleTasks(chatId); break;
-    case '/overdue':
-      await handleOverdue(chatId); break;
-    case '/week':
-      await handleWeek(chatId); break;
-    case '/positions':
-      await handlePositions(chatId); break;
-    case '/workload':
-      await handleWorkload(chatId, isAdmin, userId); break;
-    case '/myid':
-    case '/id':
-      await handleMyId(chatId, userId, userName); break;
-    case '/time':
-      await handleTime(chatId); break;
-    case '/ответ':
-      await handleOtvet(chatId, userId); break;
+  await sendMessage(chatId, `🕐 <b>Московское время:</b>\n\n<code>${timeStr}</code>\n📅 ${dateStr}`);
+}
+
+async function handleHelp(chatId: number) {
+  await sendMessage(chatId, `📖 <b>Команды бота:</b>
+
+/start — Главное меню
+/positions — Позиции сайтов
+/time — Текущее время
+/myid — Ваш Telegram ID
+/help — Эта справка
+
+🎙 <b>Голосовые сообщения:</b>
+Отправьте голосовое — я отвечу на вопрос
+
+📊 <b>Портал:</b>
+Нажмите кнопку меню внизу`, [
+    [{ text: '📊 Открыть портал', web_app: { url: PORTAL_URL } }]
+  ]);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CALLBACK HANDLER
+// ═══════════════════════════════════════════════════════════════
+
+async function handleCallback(callbackId: string, data: string, chatId: number, userId: number) {
+  const isAdmin = ADMIN_IDS.includes(userId);
+  
+  await answerCallback(callbackId);
+  
+  switch (data) {
+    case 'cmd_tasks': await handleTasks(chatId); break;
+    case 'cmd_week': await handleWeek(chatId); break;
+    case 'cmd_overdue': await handleOverdue(chatId); break;
+    case 'cmd_workload': await handleWorkload(chatId, isAdmin); break;
+    case 'cmd_time': await handleTime(chatId); break;
+    default:
+      if (data.startsWith('task_')) {
+        await sendMessage(chatId, '⚠️ Функция временно недоступна');
+      }
   }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MAIN HANDLER
+// ═══════════════════════════════════════════════════════════════
+
+export async function GET() {
+  return NextResponse.json({ 
+    status: 'Artvision Bot v3.0 (without Asana)',
+    webhook: '/api/telegram'
+  });
 }
 
 export async function POST(request: NextRequest) {
   try {
     const update = await request.json();
-    await processUpdate(update);
+    
+    // Callback query (кнопки)
+    if (update.callback_query) {
+      const cb = update.callback_query;
+      await handleCallback(
+        cb.id,
+        cb.data,
+        cb.message?.chat?.id,
+        cb.from?.id
+      );
+      return NextResponse.json({ ok: true });
+    }
+    
+    const message = update.message;
+    if (!message) return NextResponse.json({ ok: true });
+    
+    const chatId = message.chat?.id;
+    const userId = message.from?.id;
+    const userName = message.from?.first_name || 'User';
+    const text = message.text || '';
+    const isAdmin = ADMIN_IDS.includes(userId);
+    
+    // Голосовое сообщение
+    if (message.voice) {
+      await handleVoice(chatId, message.voice.file_id, userId, userName);
+      return NextResponse.json({ ok: true });
+    }
+    
+    // Команды
+    const command = text.split(' ')[0].toLowerCase();
+    
+    switch (command) {
+      case '/start':
+      case '/help':
+        await (command === '/start' ? handleStart(chatId, userName) : handleHelp(chatId));
+        break;
+      case '/tasks':
+        await handleTasks(chatId);
+        break;
+      case '/overdue':
+        await handleOverdue(chatId);
+        break;
+      case '/week':
+        await handleWeek(chatId);
+        break;
+      case '/positions':
+        await handlePositions(chatId);
+        break;
+      case '/workload':
+        await handleWorkload(chatId, isAdmin);
+        break;
+      case '/myid':
+      case '/id':
+        await handleMyId(chatId, userId, userName);
+        break;
+      case '/time':
+        await handleTime(chatId);
+        break;
+      default:
+        // Обычный текст — отвечаем через Claude
+        if (text && !text.startsWith('/')) {
+          const response = await askClaude(text);
+          if (response) {
+            await sendMessage(chatId, response);
+          }
+        }
+    }
+    
     return NextResponse.json({ ok: true });
   } catch (error) {
-    console.error('[Bot] Error:', error);
-    return NextResponse.json({ ok: false }, { status: 500 });
+    console.error('Bot error:', error);
+    return NextResponse.json({ ok: true });
   }
-}
-
-export async function GET() {
-  return NextResponse.json({ 
-    status: 'running',
-    version: '2.9',
-    features: ['Voice STT', 'Voice Code Edit', 'Asana', 'Mini App', 'Dialog Mode', 'Time Command']
-  });
 }
