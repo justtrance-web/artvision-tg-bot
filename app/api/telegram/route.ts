@@ -1,21 +1,32 @@
 /**
- * Artvision Bot v3.0
- * БЕЗ ASANA (временно отключено)
+ * Artvision Bot v4.0
+ * ==================
+ * + Система идей от клиентов (текст + голос)
+ * + Broadcast уведомления
+ * + Кнопка "Хочу тоже"
  * + Голосовые: Yandex SpeechKit (STT) + Claude (понимание)
  * + Mini App интеграция
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
+
+// ═══════════════════════════════════════════════════════════════
+// КОНФИГУРАЦИЯ
+// ═══════════════════════════════════════════════════════════════
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const ADMIN_IDS = (process.env.ADMIN_IDS || '161261562,161261652').split(',').map(Number);
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const YANDEX_API_KEY = process.env.YANDEX_API_KEY || '';
 const YANDEX_FOLDER_ID = process.env.YANDEX_FOLDER_ID || 'b1g3skikcv7e3aehpu26';
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || '';
 
 const PORTAL_URL = 'https://artvision-portal.vercel.app/webapp.html';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ═══════════════════════════════════════════════════════════════
 // TELEGRAM API
@@ -40,11 +51,13 @@ async function sendMessage(chatId: number, text: string, buttons?: InlineButton[
     body.reply_markup = { inline_keyboard: buttons };
   }
   
-  await fetch(`${TELEGRAM_API}/sendMessage`, {
+  const resp = await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
+  
+  return resp.ok;
 }
 
 async function answerCallback(callbackId: string, text?: string) {
@@ -53,58 +66,29 @@ async function answerCallback(callbackId: string, text?: string) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       callback_query_id: callbackId,
-      text: text || ''
+      text: text || '',
+      show_alert: !!text
     })
   });
 }
 
-// ═══════════════════════════════════════════════════════════════
-// GITHUB API (для голосового управления кодом)
-// ═══════════════════════════════════════════════════════════════
-
-interface GitHubFile {
-  content: string;
-  sha: string;
-}
-
-async function getGitHubFile(repo: string, path: string): Promise<GitHubFile | null> {
-  try {
-    const resp = await fetch(
-      `https://api.github.com/repos/${repo}/contents/${path}`,
-      { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
-    );
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return {
-      content: Buffer.from(data.content, 'base64').toString('utf-8'),
-      sha: data.sha
-    };
-  } catch {
-    return null;
+async function editMessage(chatId: number, messageId: number, text: string, buttons?: InlineButton[][]) {
+  const body: any = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: 'HTML'
+  };
+  
+  if (buttons) {
+    body.reply_markup = { inline_keyboard: buttons };
   }
-}
-
-async function updateGitHubFile(repo: string, path: string, content: string, sha: string, message: string): Promise<boolean> {
-  try {
-    const resp = await fetch(
-      `https://api.github.com/repos/${repo}/contents/${path}`,
-      {
-        method: 'PUT',
-        headers: {
-          Authorization: `token ${GITHUB_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          message,
-          content: Buffer.from(content).toString('base64'),
-          sha
-        })
-      }
-    );
-    return resp.ok;
-  } catch {
-    return false;
-  }
+  
+  await fetch(`${TELEGRAM_API}/editMessageText`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -125,15 +109,10 @@ async function recognizeSpeech(audioData: ArrayBuffer): Promise<string> {
       }
     );
     
-    if (!response.ok) {
-      console.error('Yandex STT error:', response.status);
-      return '';
-    }
-    
+    if (!response.ok) return '';
     const data = await response.json();
     return data.result || '';
-  } catch (error) {
-    console.error('Speech recognition error:', error);
+  } catch {
     return '';
   }
 }
@@ -154,7 +133,7 @@ async function askClaude(prompt: string, systemPrompt?: string): Promise<string>
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1024,
-        system: systemPrompt || 'Ты — помощник SEO-агентства Artvision. Отвечай кратко и по делу на русском.',
+        system: systemPrompt || 'Ты — помощник SEO-агентства Artvision. Отвечай кратко.',
         messages: [{ role: 'user', content: prompt }]
       })
     });
@@ -168,17 +147,403 @@ async function askClaude(prompt: string, systemPrompt?: string): Promise<string>
 }
 
 // ═══════════════════════════════════════════════════════════════
+// СИСТЕМА ИДЕЙ
+// ═══════════════════════════════════════════════════════════════
+
+// Режимы пользователей (ожидание ввода идеи)
+const userModes: Map<number, 'idea_text' | 'idea_voice' | null> = new Map();
+
+/**
+ * Регистрация клиента
+ */
+async function registerClient(telegramId: number, firstName: string, username?: string) {
+  await supabase
+    .from('portal_clients')
+    .upsert({
+      telegram_id: telegramId,
+      first_name: firstName,
+      telegram_username: username,
+      is_active: true,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'telegram_id' });
+}
+
+/**
+ * Получить project_code клиента
+ */
+async function getClientProject(telegramId: number): Promise<string | null> {
+  const { data } = await supabase
+    .from('portal_clients')
+    .select('project_code')
+    .eq('telegram_id', telegramId)
+    .single();
+  return data?.project_code || null;
+}
+
+/**
+ * Отправка идеи
+ */
+async function submitIdea(
+  authorId: number,
+  title: string,
+  description: string,
+  inputType: 'text' | 'voice',
+  projectCode?: string
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('portal_ideas')
+    .insert({
+      author_telegram_id: authorId,
+      author_project_code: projectCode,
+      title: title.slice(0, 100),
+      description,
+      input_type: inputType,
+      voice_transcript: inputType === 'voice' ? description : null,
+      status: 'pending'
+    })
+    .select('id')
+    .single();
+  
+  if (error) return null;
+  return data.id;
+}
+
+/**
+ * Уведомление админов о новой идее
+ */
+async function notifyAdminsNewIdea(ideaId: string, title: string, isVoice: boolean) {
+  const icon = isVoice ? '🎤' : '💡';
+  const text = `${icon} <b>Новая идея</b>
+
+<i>${title}</i>
+
+ID: <code>${ideaId.slice(0, 8)}</code>`;
+
+  const buttons: InlineButton[][] = [
+    [
+      { text: '✅ Одобрить', callback_data: `idea_approve_${ideaId}` },
+      { text: '❌ Отклонить', callback_data: `idea_reject_${ideaId}` }
+    ]
+  ];
+
+  for (const adminId of ADMIN_IDS) {
+    await sendMessage(adminId, text, buttons);
+  }
+}
+
+/**
+ * Одобрение идеи
+ */
+async function approveIdea(ideaId: string, moderatorId: number): Promise<boolean> {
+  const { data: idea, error: fetchError } = await supabase
+    .from('portal_ideas')
+    .select('*')
+    .eq('id', ideaId)
+    .single();
+  
+  if (fetchError || !idea) return false;
+  
+  const { error } = await supabase
+    .from('portal_ideas')
+    .update({
+      status: 'in_progress',
+      moderated_by: moderatorId,
+      moderated_at: new Date().toISOString(),
+      public_title: idea.title
+    })
+    .eq('id', ideaId);
+  
+  if (error) return false;
+  
+  // Broadcast всем
+  await broadcastToAll(
+    `💡 <b>Новая идея в разработке</b>
+
+<b>${idea.title}</b>
+
+Статус: 🔨 <i>Взято в работу</i>`,
+    [[{ text: '🙋 Хочу у себя тоже', callback_data: `want_${ideaId}` }]]
+  );
+  
+  return true;
+}
+
+/**
+ * Отклонение идеи
+ */
+async function rejectIdea(ideaId: string, moderatorId: number): Promise<boolean> {
+  const { error } = await supabase
+    .from('portal_ideas')
+    .update({
+      status: 'rejected',
+      moderated_by: moderatorId,
+      moderated_at: new Date().toISOString()
+    })
+    .eq('id', ideaId);
+  
+  return !error;
+}
+
+/**
+ * Отметка идеи как готовой
+ */
+async function markIdeaDone(ideaId: string, clientId: number): Promise<boolean> {
+  const { data: idea } = await supabase
+    .from('portal_ideas')
+    .select('title, public_title')
+    .eq('id', ideaId)
+    .single();
+  
+  if (!idea) return false;
+  
+  const { error } = await supabase
+    .from('portal_ideas')
+    .update({
+      status: 'done',
+      implemented_for_client: clientId,
+      implemented_at: new Date().toISOString()
+    })
+    .eq('id', ideaId);
+  
+  if (error) return false;
+  
+  // Broadcast
+  await broadcastToAll(
+    `✅ <b>Функция готова!</b>
+
+<b>${idea.public_title || idea.title}</b>
+
+Уже работает у клиента`,
+    [[{ text: '🙋 Хочу у себя тоже', callback_data: `want_${ideaId}` }]]
+  );
+  
+  return true;
+}
+
+/**
+ * Заявка "Хочу тоже"
+ */
+async function requestIdea(ideaId: string, clientId: number): Promise<'ok' | 'exists' | 'error'> {
+  const { data: existing } = await supabase
+    .from('portal_idea_requests')
+    .select('id')
+    .eq('idea_id', ideaId)
+    .eq('client_telegram_id', clientId)
+    .single();
+  
+  if (existing) return 'exists';
+  
+  const projectCode = await getClientProject(clientId);
+  
+  const { error } = await supabase
+    .from('portal_idea_requests')
+    .insert({
+      idea_id: ideaId,
+      client_telegram_id: clientId,
+      client_project_code: projectCode,
+      status: 'pending'
+    });
+  
+  if (error) return 'error';
+  
+  // Уведомляем админов
+  for (const adminId of ADMIN_IDS) {
+    await sendMessage(adminId, `🙋 <b>Новая заявка "Хочу тоже"</b>
+
+Клиент: ${clientId}
+Идея: <code>${ideaId.slice(0, 8)}</code>`);
+  }
+  
+  return 'ok';
+}
+
+/**
+ * Broadcast всем активным клиентам
+ */
+async function broadcastToAll(text: string, buttons?: InlineButton[][]) {
+  const { data: clients } = await supabase
+    .from('portal_clients')
+    .select('telegram_id')
+    .eq('is_active', true);
+  
+  if (!clients) return;
+  
+  for (const client of clients) {
+    await sendMessage(client.telegram_id, text, buttons);
+    await new Promise(r => setTimeout(r, 50)); // Rate limit
+  }
+}
+
+/**
+ * Статистика идей для админа
+ */
+async function getIdeasStats(): Promise<string> {
+  const [pending, inProgress, done, requests] = await Promise.all([
+    supabase.from('portal_ideas').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+    supabase.from('portal_ideas').select('*', { count: 'exact', head: true }).eq('status', 'in_progress'),
+    supabase.from('portal_ideas').select('*', { count: 'exact', head: true }).eq('status', 'done'),
+    supabase.from('portal_idea_requests').select('*', { count: 'exact', head: true })
+  ]);
+  
+  return `📊 <b>Статистика идей</b>
+
+⏳ На модерации: ${pending.count || 0}
+🔨 В работе: ${inProgress.count || 0}
+✅ Готово: ${done.count || 0}
+
+🙋 Заявок "Хочу тоже": ${requests.count || 0}`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ОБРАБОТЧИКИ КОМАНД
+// ═══════════════════════════════════════════════════════════════
+
+async function handleStart(chatId: number, userId: number, userName: string, username?: string) {
+  // Регистрируем клиента
+  await registerClient(userId, userName, username);
+  
+  const text = `👋 Привет, ${userName}!
+
+Я бот <b>Artvision</b> — SEO-агентства.
+
+📊 <b>Портал</b> — статистика сайтов
+💡 <b>Идея</b> — предложить улучшение
+🎙 <b>Голос</b> — отправьте голосовое
+
+<i>Ваши идеи помогают нам становиться лучше!</i>`;
+
+  await sendMessage(chatId, text, [
+    [{ text: '📊 Открыть портал', web_app: { url: PORTAL_URL } }],
+    [{ text: '💡 Предложить идею', callback_data: 'start_idea' }]
+  ]);
+}
+
+async function handleIdea(chatId: number, userId: number) {
+  userModes.set(userId, 'idea_text');
+  
+  await sendMessage(chatId, `💡 <b>Предложить идею</b>
+
+Напишите текстом или отправьте голосовое сообщение с описанием вашей идеи.
+
+Примеры:
+• "Хочу получать отчёт в PDF каждую неделю"
+• "Добавьте уведомления о падении позиций"
+
+<i>Отправьте сообщение ниже...</i>`, [
+    [{ text: '❌ Отмена', callback_data: 'cancel_idea' }]
+  ]);
+}
+
+async function handleHelp(chatId: number) {
+  await sendMessage(chatId, `📖 <b>Команды бота</b>
+
+/start — Главное меню
+/idea — Предложить идею
+/positions — Позиции сайтов
+/time — Текущее время
+/help — Эта справка
+
+🎙 <b>Голосовые:</b>
+Отправьте голосовое — я распознаю и отвечу
+
+💡 <b>Идеи:</b>
+Используйте /idea или кнопку в меню`, [
+    [{ text: '📊 Открыть портал', web_app: { url: PORTAL_URL } }]
+  ]);
+}
+
+async function handleAdminIdeas(chatId: number, userId: number) {
+  if (!ADMIN_IDS.includes(userId)) {
+    await sendMessage(chatId, '🔒 Только для администраторов');
+    return;
+  }
+  
+  const { data: ideas } = await supabase
+    .from('portal_ideas')
+    .select('*')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(10);
+  
+  if (!ideas || ideas.length === 0) {
+    await sendMessage(chatId, '✅ Нет идей на модерации');
+    return;
+  }
+  
+  let text = `📋 <b>Идеи на модерации (${ideas.length})</b>\n\n`;
+  
+  for (const idea of ideas) {
+    const icon = idea.input_type === 'voice' ? '🎤' : '💡';
+    text += `${icon} <code>${idea.id.slice(0, 8)}</code>\n`;
+    text += `<i>${idea.title}</i>\n\n`;
+  }
+  
+  await sendMessage(chatId, text);
+}
+
+async function handleAdminStats(chatId: number, userId: number) {
+  if (!ADMIN_IDS.includes(userId)) {
+    await sendMessage(chatId, '🔒 Только для администраторов');
+    return;
+  }
+  
+  const stats = await getIdeasStats();
+  await sendMessage(chatId, stats);
+}
+
+async function handleAdminBroadcast(chatId: number, userId: number, text: string) {
+  if (!ADMIN_IDS.includes(userId)) {
+    await sendMessage(chatId, '🔒 Только для администраторов');
+    return;
+  }
+  
+  const message = text.replace('/broadcast ', '').trim();
+  if (!message) {
+    await sendMessage(chatId, 'Использование: /broadcast Текст сообщения');
+    return;
+  }
+  
+  await sendMessage(chatId, '📤 Отправляю...');
+  await broadcastToAll(`📢 <b>Объявление</b>\n\n${message}`);
+  await sendMessage(chatId, '✅ Broadcast отправлен');
+}
+
+async function handleAdminDone(chatId: number, userId: number, text: string) {
+  if (!ADMIN_IDS.includes(userId)) {
+    await sendMessage(chatId, '🔒 Только для администраторов');
+    return;
+  }
+  
+  const parts = text.split(' ');
+  if (parts.length < 3) {
+    await sendMessage(chatId, 'Использование: /done [idea_id] [client_telegram_id]');
+    return;
+  }
+  
+  const ideaId = parts[1];
+  const clientId = parseInt(parts[2]);
+  
+  const success = await markIdeaDone(ideaId, clientId);
+  
+  if (success) {
+    await sendMessage(chatId, `✅ Идея <code>${ideaId.slice(0, 8)}</code> отмечена как готовая`);
+  } else {
+    await sendMessage(chatId, '❌ Ошибка');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // VOICE HANDLER
 // ═══════════════════════════════════════════════════════════════
 
-async function handleVoice(chatId: number, fileId: string, userId: number, userName: string) {
+async function handleVoice(chatId: number, fileId: string, userId: number) {
   try {
-    // 1. Получаем файл
+    // Получаем файл
     const fileResp = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
     const fileData = await fileResp.json();
     
     if (!fileData.ok) {
-      await sendMessage(chatId, '❌ Не удалось получить голосовое сообщение');
+      await sendMessage(chatId, '❌ Не удалось получить голосовое');
       return;
     }
     
@@ -186,153 +551,127 @@ async function handleVoice(chatId: number, fileId: string, userId: number, userN
     const audioResp = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`);
     const audioBuffer = await audioResp.arrayBuffer();
     
-    // 2. Распознаём речь
-    const recognizedText = await recognizeSpeech(audioBuffer);
+    // Распознаём
+    const transcript = await recognizeSpeech(audioBuffer);
     
-    if (!recognizedText) {
-      await sendMessage(chatId, '❌ Не удалось распознать речь. Попробуйте ещё раз.');
+    if (!transcript) {
+      await sendMessage(chatId, '❌ Не удалось распознать речь');
       return;
     }
     
-    // 3. Анализируем через Claude
-    const analysis = await askClaude(
-      `Пользователь сказал: "${recognizedText}"
+    // Проверяем режим — если ждём идею, сохраняем как идею
+    if (userModes.get(userId) === 'idea_text') {
+      userModes.delete(userId);
       
-Определи тип запроса:
-1. Если это вопрос про SEO, маркетинг, сайты — ответь на него
-2. Если это запрос на создание задачи — скажи что функция временно недоступна
-3. Если непонятно — попроси уточнить
+      const projectCode = await getClientProject(userId);
+      const ideaId = await submitIdea(userId, transcript, transcript, 'voice', projectCode || undefined);
+      
+      if (ideaId) {
+        await notifyAdminsNewIdea(ideaId, transcript, true);
+        await sendMessage(chatId, `✅ <b>Идея отправлена!</b>
 
-Отвечай кратко.`,
-      'Ты — голосовой помощник SEO-агентства Artvision.'
-    );
+<i>"${transcript}"</i>
+
+Мы рассмотрим её и сообщим о решении.`);
+      } else {
+        await sendMessage(chatId, '❌ Не удалось сохранить идею');
+      }
+      return;
+    }
     
-    await sendMessage(chatId, `🎙 <i>"${recognizedText}"</i>\n\n${analysis}`);
+    // Обычное голосовое — отвечаем через Claude
+    const response = await askClaude(transcript);
+    await sendMessage(chatId, `🎙 <i>"${transcript}"</i>\n\n${response}`);
     
   } catch (error) {
-    console.error('Voice handler error:', error);
-    await sendMessage(chatId, '❌ Ошибка обработки голосового сообщения');
+    console.error('Voice error:', error);
+    await sendMessage(chatId, '❌ Ошибка обработки');
   }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// COMMAND HANDLERS
-// ═══════════════════════════════════════════════════════════════
-
-async function handleStart(chatId: number, userName: string) {
-  const text = `👋 Привет, ${userName}!
-
-Я бот <b>Artvision</b> — SEO-агентства.
-
-📊 <b>Портал</b> — статистика сайтов
-🎙 <b>Голос</b> — задавайте вопросы голосом
-
-<i>Нажмите кнопку меню для доступа к порталу</i>`;
-
-  await sendMessage(chatId, text, [
-    [
-      { text: '📊 Открыть портал', web_app: { url: PORTAL_URL } }
-    ],
-    [
-      { text: '🕐 Время', callback_data: 'cmd_time' }
-    ]
-  ]);
-}
-
-// ⚠️ ASANA ВРЕМЕННО ОТКЛЮЧЕНА
-async function handleTasks(chatId: number) {
-  await sendMessage(chatId, `⚠️ <b>Функция временно недоступна</b>
-
-Интеграция с Asana на обслуживании.
-
-Используйте приложение Asana напрямую:
-📱 <a href="https://app.asana.com">app.asana.com</a>`, [
-    [{ text: '📊 Открыть портал', web_app: { url: PORTAL_URL } }]
-  ]);
-}
-
-async function handleOverdue(chatId: number) {
-  await sendMessage(chatId, `⚠️ <b>Функция временно недоступна</b>
-
-Интеграция с Asana на обслуживании.`);
-}
-
-async function handleWeek(chatId: number) {
-  await sendMessage(chatId, `⚠️ <b>Функция временно недоступна</b>
-
-Интеграция с Asana на обслуживании.`);
-}
-
-async function handleWorkload(chatId: number, isAdmin: boolean) {
-  if (!isAdmin) {
-    await sendMessage(chatId, '🔒 Только для администраторов');
-    return;
-  }
-  await sendMessage(chatId, `⚠️ <b>Функция временно недоступна</b>
-
-Интеграция с Asana на обслуживании.`);
-}
-
-async function handlePositions(chatId: number) {
-  await sendMessage(chatId, `📈 <b>Позиции сайтов</b>
-
-Откройте портал для просмотра статистики:`, [
-    [{ text: '📊 Открыть портал', web_app: { url: PORTAL_URL } }]
-  ]);
-}
-
-async function handleMyId(chatId: number, userId: number, userName: string) {
-  const isAdmin = ADMIN_IDS.includes(userId);
-  await sendMessage(chatId, `🆔 <b>Ваш Telegram ID:</b> <code>${userId}</code>\n👤 Имя: ${userName}\n${isAdmin ? '✅ Вы админ' : '❌ Вы не админ'}`);
-}
-
-async function handleTime(chatId: number) {
-  const now = new Date();
-  const msk = new Date(now.getTime() + 3 * 60 * 60 * 1000);
-  const timeStr = msk.toISOString().slice(11, 19);
-  const dateStr = msk.toISOString().slice(0, 10).split('-').reverse().join('.');
-  
-  await sendMessage(chatId, `🕐 <b>Московское время:</b>\n\n<code>${timeStr}</code>\n📅 ${dateStr}`);
-}
-
-async function handleHelp(chatId: number) {
-  await sendMessage(chatId, `📖 <b>Команды бота:</b>
-
-/start — Главное меню
-/positions — Позиции сайтов
-/time — Текущее время
-/myid — Ваш Telegram ID
-/help — Эта справка
-
-🎙 <b>Голосовые сообщения:</b>
-Отправьте голосовое — я отвечу на вопрос
-
-📊 <b>Портал:</b>
-Нажмите кнопку меню внизу`, [
-    [{ text: '📊 Открыть портал', web_app: { url: PORTAL_URL } }]
-  ]);
 }
 
 // ═══════════════════════════════════════════════════════════════
 // CALLBACK HANDLER
 // ═══════════════════════════════════════════════════════════════
 
-async function handleCallback(callbackId: string, data: string, chatId: number, userId: number) {
-  const isAdmin = ADMIN_IDS.includes(userId);
+async function handleCallback(
+  callbackId: string, 
+  data: string, 
+  chatId: number, 
+  messageId: number,
+  userId: number
+) {
+  // Кнопка "Предложить идею"
+  if (data === 'start_idea') {
+    await answerCallback(callbackId);
+    await handleIdea(chatId, userId);
+    return;
+  }
+  
+  // Отмена идеи
+  if (data === 'cancel_idea') {
+    userModes.delete(userId);
+    await answerCallback(callbackId, 'Отменено');
+    await editMessage(chatId, messageId, '❌ Ввод идеи отменён');
+    return;
+  }
+  
+  // Одобрение идеи (админ)
+  if (data.startsWith('idea_approve_')) {
+    if (!ADMIN_IDS.includes(userId)) {
+      await answerCallback(callbackId, '🔒 Только для админов');
+      return;
+    }
+    
+    const ideaId = data.replace('idea_approve_', '');
+    const success = await approveIdea(ideaId, userId);
+    
+    if (success) {
+      await answerCallback(callbackId, '✅ Одобрено и разослано');
+      await editMessage(chatId, messageId, `✅ Идея <code>${ideaId.slice(0, 8)}</code> одобрена и разослана клиентам`);
+    } else {
+      await answerCallback(callbackId, '❌ Ошибка');
+    }
+    return;
+  }
+  
+  // Отклонение идеи (админ)
+  if (data.startsWith('idea_reject_')) {
+    if (!ADMIN_IDS.includes(userId)) {
+      await answerCallback(callbackId, '🔒 Только для админов');
+      return;
+    }
+    
+    const ideaId = data.replace('idea_reject_', '');
+    const success = await rejectIdea(ideaId, userId);
+    
+    if (success) {
+      await answerCallback(callbackId, '❌ Отклонено');
+      await editMessage(chatId, messageId, `❌ Идея <code>${ideaId.slice(0, 8)}</code> отклонена`);
+    } else {
+      await answerCallback(callbackId, '❌ Ошибка');
+    }
+    return;
+  }
+  
+  // Кнопка "Хочу тоже"
+  if (data.startsWith('want_')) {
+    const ideaId = data.replace('want_', '');
+    const result = await requestIdea(ideaId, userId);
+    
+    switch (result) {
+      case 'ok':
+        await answerCallback(callbackId, '✅ Заявка принята! Мы свяжемся с вами');
+        break;
+      case 'exists':
+        await answerCallback(callbackId, '⚠️ Вы уже оставляли заявку');
+        break;
+      default:
+        await answerCallback(callbackId, '❌ Ошибка');
+    }
+    return;
+  }
   
   await answerCallback(callbackId);
-  
-  switch (data) {
-    case 'cmd_tasks': await handleTasks(chatId); break;
-    case 'cmd_week': await handleWeek(chatId); break;
-    case 'cmd_overdue': await handleOverdue(chatId); break;
-    case 'cmd_workload': await handleWorkload(chatId, isAdmin); break;
-    case 'cmd_time': await handleTime(chatId); break;
-    default:
-      if (data.startsWith('task_')) {
-        await sendMessage(chatId, '⚠️ Функция временно недоступна');
-      }
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -341,7 +680,7 @@ async function handleCallback(callbackId: string, data: string, chatId: number, 
 
 export async function GET() {
   return NextResponse.json({ 
-    status: 'Artvision Bot v3.0 (without Asana)',
+    status: 'Artvision Bot v4.0 (Ideas + Broadcast)',
     webhook: '/api/telegram'
   });
 }
@@ -350,13 +689,14 @@ export async function POST(request: NextRequest) {
   try {
     const update = await request.json();
     
-    // Callback query (кнопки)
+    // Callback query
     if (update.callback_query) {
       const cb = update.callback_query;
       await handleCallback(
         cb.id,
         cb.data,
         cb.message?.chat?.id,
+        cb.message?.message_id,
         cb.from?.id
       );
       return NextResponse.json({ ok: true });
@@ -368,12 +708,30 @@ export async function POST(request: NextRequest) {
     const chatId = message.chat?.id;
     const userId = message.from?.id;
     const userName = message.from?.first_name || 'User';
+    const username = message.from?.username;
     const text = message.text || '';
-    const isAdmin = ADMIN_IDS.includes(userId);
     
-    // Голосовое сообщение
+    // Голосовое
     if (message.voice) {
-      await handleVoice(chatId, message.voice.file_id, userId, userName);
+      await handleVoice(chatId, message.voice.file_id, userId);
+      return NextResponse.json({ ok: true });
+    }
+    
+    // Проверяем режим ввода идеи
+    if (userModes.get(userId) === 'idea_text' && text && !text.startsWith('/')) {
+      userModes.delete(userId);
+      
+      const projectCode = await getClientProject(userId);
+      const ideaId = await submitIdea(userId, text, text, 'text', projectCode || undefined);
+      
+      if (ideaId) {
+        await notifyAdminsNewIdea(ideaId, text, false);
+        await sendMessage(chatId, `✅ <b>Идея отправлена!</b>
+
+Мы рассмотрим её и сообщим о решении.`);
+      } else {
+        await sendMessage(chatId, '❌ Не удалось сохранить идею');
+      }
       return NextResponse.json({ ok: true });
     }
     
@@ -382,38 +740,39 @@ export async function POST(request: NextRequest) {
     
     switch (command) {
       case '/start':
+        await handleStart(chatId, userId, userName, username);
+        break;
       case '/help':
-        await (command === '/start' ? handleStart(chatId, userName) : handleHelp(chatId));
+        await handleHelp(chatId);
         break;
-      case '/tasks':
-        await handleTasks(chatId);
+      case '/idea':
+        await handleIdea(chatId, userId);
         break;
-      case '/overdue':
-        await handleOverdue(chatId);
+      case '/ideas':
+        await handleAdminIdeas(chatId, userId);
         break;
-      case '/week':
-        await handleWeek(chatId);
+      case '/stats':
+        await handleAdminStats(chatId, userId);
         break;
-      case '/positions':
-        await handlePositions(chatId);
+      case '/broadcast':
+        await handleAdminBroadcast(chatId, userId, text);
         break;
-      case '/workload':
-        await handleWorkload(chatId, isAdmin);
-        break;
-      case '/myid':
-      case '/id':
-        await handleMyId(chatId, userId, userName);
+      case '/done':
+        await handleAdminDone(chatId, userId, text);
         break;
       case '/time':
-        await handleTime(chatId);
+        const now = new Date();
+        const msk = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+        await sendMessage(chatId, `🕐 ${msk.toISOString().slice(11, 19)} МСК`);
+        break;
+      case '/myid':
+        await sendMessage(chatId, `🆔 ${userId}`);
         break;
       default:
-        // Обычный текст — отвечаем через Claude
+        // Обычный текст → Claude
         if (text && !text.startsWith('/')) {
           const response = await askClaude(text);
-          if (response) {
-            await sendMessage(chatId, response);
-          }
+          if (response) await sendMessage(chatId, response);
         }
     }
     
